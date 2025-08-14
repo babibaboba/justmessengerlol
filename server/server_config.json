@@ -1,0 +1,13 @@
+{
+  "server_name": "My JustMessenger Server",
+  "host": "0.0.0.0",
+  "port": 12345,
+  "mode": "relay",
+  "welcome_message": "Welcome to the server!",
+  "allow_anonymous": true,
+  "max_clients": 100,
+  "plugins": {
+    "enabled": true,
+    "directory": "VoiceChat/plugins"
+  }
+}

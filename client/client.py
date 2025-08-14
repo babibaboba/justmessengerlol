@@ -2,20 +2,21 @@ import sys
 import socket
 import threading
 import json
+import pyaudio
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QLineEdit,
                              QPushButton, QVBoxLayout, QWidget, QMessageBox,
                              QDialog, QLabel, QFormLayout, QListWidget, QHBoxLayout, QSplitter,
                              QInputDialog, QGridLayout)
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize
-import pyaudio
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize, QMetaObject
 
 # Проверяем, существуют ли файлы, и импортируем их
 try:
     from config_manager import ConfigManager
     from p2p_manager import P2PManager
     from plugin_manager import PluginManager
-except ImportError:
-    print("Ошибка: Не найдены модули config_manager.py, p2p_manager.py или plugin_manager.py")
+except ImportError as e:
+    print(f"Ошибка импорта: {e}")
+    print("Убедитесь, что файлы config_manager.py, p2p_manager.py и plugin_manager.py находятся в той же директории.")
     sys.exit(1)
 
 
@@ -61,7 +62,6 @@ class EmojiPanel(QDialog):
         
         self.layout = QGridLayout(self)
         
-        # Простой набор эмодзи для примера
         emojis = [
             '😀', '😂', '😍', '🤔', '👍', '👎', '❤️', '🔥',
             '🚀', '🎉', '👋', '😢', '😠', '🙏', '💻', '🍕'
@@ -111,38 +111,11 @@ class ModeSelectionDialog(QDialog):
        self.result = mode
        self.accept()
 
-class LoginDialog(QDialog):
-    """Диалоговое окно для входа и регистрации в серверном режиме."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Вход")
-        self.layout = QFormLayout(self)
-
-        self.username_input = QLineEdit()
-        self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        
-        self.layout.addRow("Имя пользователя:", self.username_input)
-        self.layout.addRow("Пароль:", self.password_input)
-
-        self.login_button = QPushButton("Войти")
-        self.register_button = QPushButton("Регистрация")
-        
-        self.layout.addWidget(self.login_button)
-        self.layout.addWidget(self.register_button)
-
-        self.login_button.clicked.connect(self.accept)
-        # Отправляем кастомный код, чтобы отличить от простого закрытия
-        self.register_button.clicked.connect(lambda: self.done(2)) 
-
-    def get_credentials(self):
-        return self.username_input.text(), self.password_input.text()
-
 # --- Сетевые потоки ---
 
 class ServerNetworkThread(QThread):
     """Поток для сетевого взаимодействия с центральным сервером."""
-    response_received = pyqtSignal(dict)
+    message_received = pyqtSignal(dict)
     connection_lost = pyqtSignal()
 
     def __init__(self, sock):
@@ -157,7 +130,7 @@ class ServerNetworkThread(QThread):
                 if not data:
                     break
                 response = json.loads(data.decode('utf-8'))
-                self.response_received.emit(response)
+                self.message_received.emit(response)
             except (socket.error, json.JSONDecodeError, ConnectionResetError):
                 if self.running:
                     self.running = False
@@ -203,7 +176,7 @@ class AudioThread(QThread):
     def send_audio(self):
         while self.running:
             try:
-                data = self.input_stream.read(CHUNK)
+                data = self.input_stream.read(CHUNK, exception_on_overflow=False)
                 self.udp_socket.sendto(data, self.peer_addr)
             except (IOError, OSError):
                 break
@@ -218,12 +191,19 @@ class AudioThread(QThread):
 
     def stop(self):
         self.running = False
-        self.input_stream.stop_stream()
+        # Даем потокам немного времени на завершение
+        self.join(500) 
+        
+        if self.input_stream.is_active():
+            self.input_stream.stop_stream()
         self.input_stream.close()
-        self.output_stream.stop_stream()
+        
+        if self.output_stream.is_active():
+            self.output_stream.stop_stream()
         self.output_stream.close()
+        
         self.audio.terminate()
-        self.udp_socket.close()
+        # UDP сокет закрывается в hang_up_call
         print("Аудиопоток остановлен.")
 
 # --- Главное окно ---
@@ -233,8 +213,8 @@ class ChatWindow(QMainWindow):
         super().__init__()
         self.mode = mode
         self.username = None
-        self.network_thread = None
         self.p2p_manager = None
+        self.network_thread = None
         self.sock = None
         self.plugin_manager = PluginManager(plugin_folder='VoiceChat/plugins')
         
@@ -242,16 +222,16 @@ class ChatWindow(QMainWindow):
         self.udp_socket = None
         self.audio_thread = None
         self.call_window = None
-        self.current_peer_addr = None # Адрес для P2P звонка
+        self.current_peer_addr = None
+        self.pending_call_target = None # Хранит имя пользователя, которому мы пытаемся позвонить
         self.current_theme = 'light'
 
         self.setup_ui()
-        self.apply_theme() # Применяем тему по умолчанию
+        self.apply_theme()
         self.plugin_manager.discover_plugins()
         self.initialize_mode()
 
     def setup_ui(self):
-        """Настраивает основной интерфейс окна."""
         self.setWindowTitle(f"JustMessenger ({self.mode.replace('_', ' ').title()})")
         self.setGeometry(100, 100, 500, 600)
         
@@ -265,7 +245,6 @@ class ChatWindow(QMainWindow):
         self.chat_box = QTextEdit()
         self.chat_box.setReadOnly(True)
         
-        # Layout для поля ввода и кнопок
         input_layout = QHBoxLayout()
         self.msg_entry = QLineEdit()
         self.msg_entry.returnPressed.connect(self.send_message)
@@ -290,7 +269,6 @@ class ChatWindow(QMainWindow):
         self.users_list = QListWidget()
         users_layout.addWidget(QLabel("Пользователи в сети:"))
         
-        # --- Панель поиска для DHT ---
         self.peer_search_widget = QWidget()
         peer_search_layout = QHBoxLayout(self.peer_search_widget)
         peer_search_layout.setContentsMargins(0, 0, 0, 0)
@@ -299,411 +277,338 @@ class ChatWindow(QMainWindow):
         self.peer_search_button = QPushButton("Найти")
         peer_search_layout.addWidget(self.peer_search_input)
         peer_search_layout.addWidget(self.peer_search_button)
-        self.peer_search_widget.setVisible(False) # Скрыто по умолчанию
+        self.peer_search_widget.setVisible(False)
         users_layout.addWidget(self.peer_search_widget)
-        # --- Конец панели поиска ---
 
         users_layout.addWidget(self.users_list)
         
         self.status_button = QPushButton("Сменить статус")
         self.status_button.clicked.connect(self.change_status)
         users_layout.addWidget(self.status_button)
-        self.status_button.setVisible(False) # Скрываем до входа в систему
+        self.status_button.setVisible(False)
 
         splitter.addWidget(users_widget)
         
         splitter.setSizes([350, 150])
         self.main_layout.addWidget(splitter)
 
-        # Добавляем кнопку смены темы в основной layout
         self.theme_button = QPushButton("Сменить тему")
         self.theme_button.clicked.connect(self.toggle_theme)
         chat_layout.addWidget(self.theme_button)
 
     def initialize_mode(self):
-        """Инициализирует логику в зависимости от выбранного режима."""
         if self.mode == 'p2p_local':
-            self.init_p2p_mode(local=True)
+            self.init_p2p_mode(p2p_mode='local')
         elif self.mode == 'p2p_internet':
-            self.init_p2p_mode(local=False)
-        else:
+            self.init_p2p_mode(p2p_mode='internet')
+        elif self.mode == 'server':
             self.init_server_mode()
 
-    def init_p2p_mode(self, local=True):
-        """Настройка для P2P режима."""
-        # Добавляем кнопку звонка
+    def init_p2p_mode(self, p2p_mode='internet'):
         self.call_button = QPushButton("📞 Позвонить")
         self.call_button.clicked.connect(self.initiate_call)
         self.call_button.setEnabled(False)
         self.users_list.itemSelectionChanged.connect(lambda: self.call_button.setEnabled(True))
-        self.main_layout.itemAt(1).widget().layout().insertWidget(0, self.call_button)
+        
+        # Добавляем кнопку в layout пользователей
+        users_layout = self.main_layout.itemAt(0).widget().findChild(QVBoxLayout)
+        if users_layout:
+             users_layout.insertWidget(2, self.call_button)
 
         config_manager = ConfigManager()
         config = config_manager.load_config()
         self.username = config.get('username')
 
         if not self.username:
-            text, ok = QInputDialog.getText(self, 'Имя пользователя', 'Введите ваше имя для P2P сессии:')
+            text, ok = QInputDialog.getText(self, 'Имя пользователя', 'Введите ваше имя для сессии:')
             if ok and text:
                 self.username = text
                 config_manager.save_config({'username': self.username})
             else:
                 sys.exit()
         
-        self.setWindowTitle(f"Мессенджер (P2P) - {self.username}")
-        self.p2p_manager = P2PManager(self.username, local=local)
+        self.setWindowTitle(f"JustMessenger ({self.mode.replace('_', ' ').title()}) - {self.username}")
+        
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.bind(('', 0)) # Привязка к случайному порту
+
+        self.p2p_manager = P2PManager(self.username, self.udp_socket, mode=p2p_mode)
         self.p2p_manager.peer_discovered.connect(self.add_peer)
         self.p2p_manager.peer_lost.connect(self.remove_peer)
         self.p2p_manager.message_received.connect(self.p2p_message_received)
-        # Подключаем новые сигналы звонков
         self.p2p_manager.incoming_p2p_call.connect(self.handle_p2p_call_request)
         self.p2p_manager.p2p_call_response.connect(self.handle_p2p_call_response)
         self.p2p_manager.p2p_hang_up.connect(self.handle_p2p_hang_up)
+        self.p2p_manager.hole_punch_successful.connect(self.on_hole_punch_success)
         self.p2p_manager.start()
-        if local:
+
+        if p2p_mode == 'local':
             self.add_message_to_box("Система: Вы в режиме P2P (Локальная сеть). Идет поиск других пользователей...")
-        else:
+            self.peer_search_widget.setVisible(False)
+        else: # internet
             self.add_message_to_box("Система: Вы в режиме P2P (Интернет). Используйте поиск, чтобы найти пользователей.")
             self.peer_search_widget.setVisible(True)
             self.peer_search_button.clicked.connect(self.search_peer_in_dht)
             self.peer_search_input.returnPressed.connect(self.search_peer_in_dht)
 
     def init_server_mode(self):
-        """Настройка для Клиент-Серверного режима."""
-        self.users_list.setVisible(True)
-        self.call_button = QPushButton("📞 Позвонить")
-        self.call_button.clicked.connect(self.initiate_call)
-        self.call_button.setEnabled(False)
-        self.users_list.itemSelectionChanged.connect(lambda: self.call_button.setEnabled(True))
-        
-        # Вставляем кнопку перед списком пользователей
-        self.main_layout.itemAt(1).widget().layout().insertWidget(0, self.call_button)
+        config_manager = ConfigManager()
+        config = config_manager.load_config()
+        self.username = config.get('username')
 
+        if not self.username:
+            text, ok = QInputDialog.getText(self, 'Имя пользователя', 'Введите ваше имя для сессии:')
+            if ok and text:
+                self.username = text
+                config_manager.save_config({'username': self.username})
+            else:
+                sys.exit()
+
+        self.setWindowTitle(f"JustMessenger (Сервер) - {self.username}")
+        
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((HOST, PORT))
             
             self.network_thread = ServerNetworkThread(self.sock)
-            self.network_thread.response_received.connect(self.handle_server_response)
+            self.network_thread.message_received.connect(self.handle_server_message)
             self.network_thread.connection_lost.connect(self.handle_connection_lost)
             self.network_thread.start()
-
-            self.show_login_dialog()
-        except ConnectionRefusedError:
-            self.show_error("Не удалось подключиться к серверу.")
-            self.disable_input()
-
-    def show_login_dialog(self):
-        """Показывает диалог входа/регистрации и обрабатывает результат."""
-        dialog = LoginDialog(self)
-        result = dialog.exec()
-        username, password = dialog.get_credentials()
-
-        if not username or not password:
-            self.close()
-            return
-
-        if result == QDialog.DialogCode.Accepted:
-            self.send_command('login', {'username': username, 'password': password})
-        elif result == 2:
-            self.send_command('register', {'username': username, 'password': password})
-            # После попытки регистрации снова покажем окно для входа
-            QMessageBox.information(self, "Регистрация", "Запрос на регистрацию отправлен. Теперь попробуйте войти.")
-            self.show_login_dialog()
-
-    def send_command(self, command, payload):
-        """Отправляет JSON-команду на сервер."""
-        if not self.sock: return
-        request = {'command': command, 'payload': payload}
-        try:
-            self.sock.sendall(json.dumps(request).encode('utf-8'))
-        except socket.error:
-            self.handle_connection_lost()
-
-    def handle_server_response(self, response):
-        """Обрабатывает ответы от сервера."""
-        status = response.get('status')
-        data = response.get('data', '')
-
-        if status == 'login_success':
-            self.username = data.get('username')
-            self.setWindowTitle(f"Мессенджер - {self.username}")
-            self.add_message_to_box("Система: Вы успешно вошли в систему.")
             self.enable_input()
-            self.status_button.setVisible(True) # Показываем кнопку смены статуса
-            # Список пользователей придет через broadcast_user_list_update от сервера
-        
-        elif status == 'user_list':
-            self.update_user_list(data.get('users', []))
+            self.add_message_to_box(f"Система: Подключено к серверу {HOST}:{PORT}")
 
-        elif status == 'new_message':
-           self.display_new_message(data)
-
-        elif status == 'incoming_call':
-            from_user = data.get('from_user')
-            caller_addr = tuple(data.get('caller_addr')) # (ip, port)
-            
-            reply = QMessageBox.question(self, 'Входящий звонок',
-                                         f"Вам звонит {from_user}. Принять?",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            
-            if reply == QMessageBox.StandardButton.Yes:
-                self.udp_socket = self.create_udp_socket()
-                if not self.udp_socket: return
-
-                _, udp_port = self.udp_socket.getsockname()
-                self.send_command('call_response', {
-                    'to_user': from_user,
-                    'answer': 'accept',
-                    'udp_port': udp_port
-                })
-                self.start_call_session(from_user, caller_addr)
-            else:
-                self.send_command('call_response', {'to_user': from_user, 'answer': 'reject'})
-
-        elif status == 'call_response':
-            from_user = data.get('from_user')
-            answer = data.get('answer')
-            if answer == 'accept':
-                callee_addr = tuple(data.get('callee_addr'))
-                self.add_message_to_box(f"Система: {from_user} принял ваш звонок. Соединение...")
-                self.start_call_session(from_user, callee_addr)
-            else:
-                self.add_message_to_box(f"Система: {from_user} отклонил ваш звонок.")
-                self.hang_up_call() # Закрываем наш UDP сокет, если он был создан
-
-        elif status == 'status_update_success':
-            self.add_message_to_box(f"Система: Ваш статус обновлен на {data.get('status_emoji')}")
-
-        elif status == 'error':
-            self.show_error(str(data))
-        elif status == 'info':
-            self.add_message_to_box(f"Сервер: {data}")
+        except ConnectionRefusedError:
+            self.show_error(f"Не удалось подключиться к серверу {HOST}:{PORT}.")
+            self.disable_input()
 
     def send_message(self):
         message = self.msg_entry.text()
         if not message: return
 
-        # --- Plugin Hook ---
-        # Позволяет плагинам перехватывать или изменять сообщение.
-        # Если хук возвращает False, сообщение не отправляется.
         continue_sending = self.plugin_manager.trigger_hook('before_send_message', message=message)
         if continue_sending is False:
             self.msg_entry.clear()
             return
-        # --- End Plugin Hook ---
 
         if self.mode.startswith('p2p'):
             self.p2p_manager.broadcast_message(message)
             self.add_message_to_box(f"Вы: {message}")
-        else: # server mode
-            self.send_command('send_message', {'type': 'text', 'text': message})
-            self.add_message_to_box(f"Вы: {message}")
-            
+        elif self.mode == 'server':
+            self.send_command_to_server({'type': 'text_message', 'sender': self.username, 'text': message})
+            # Не отображаем свое сообщение, ждем его от сервера
+        
         self.msg_entry.clear()
 
-    def initiate_call(self):
-        """Начинает звонок выбранному пользователю в зависимости от режима."""
-        selected_items = self.users_list.selectedItems()
-        if not selected_items: return
-        
-        # Извлекаем имя пользователя, игнорируя статус и "(Вы)"
-        full_text = selected_items[0].text()
-        clean_text = full_text.split(' (Вы)')[0]
-        target_user = clean_text.split(' ', 1)[1] if ' ' in clean_text else clean_text
-
-        if target_user == self.username:
-            self.show_error("Вы не можете позвонить самому себе.")
-            return
-        
-        self.udp_socket = self.create_udp_socket()
-        if not self.udp_socket: return
-
-        _, udp_port = self.udp_socket.getsockname()
-        self.add_message_to_box(f"Система: Выполняется звонок пользователю {target_user}...")
-
-        if self.mode == 'p2p':
-            # В P2P режиме IP адрес уже известен, отправляем только порт
-            self.p2p_manager.send_peer_command(target_user, 'p2p_call_request', {'udp_port': udp_port})
-        else: # server mode
-            self.send_command('call_request', {'to_user': target_user, 'udp_port': udp_port})
-
-    def start_call_session(self, peer_username, peer_addr):
-        """Начинает аудиопоток и открывает окно звонка."""
-        if self.audio_thread and self.audio_thread.isRunning():
-            self.add_message_to_box("Система: Вы уже в звонке.")
-            return
-
-        self.add_message_to_box(f"Система: Начало сеанса связи с {peer_username} по адресу {peer_addr}.")
-        
+    def send_command_to_server(self, command_dict):
+        if not self.sock: return
         try:
-            self.audio_thread = AudioThread(self.udp_socket, peer_addr)
-            self.audio_thread.start()
+            self.sock.sendall(json.dumps(command_dict).encode('utf-8'))
+        except socket.error as e:
+            self.show_error(f"Ошибка отправки данных на сервер: {e}")
+            self.handle_connection_lost()
 
-            self.call_window = CallWindow(peer_username, self)
-            self.call_window.hang_up_pressed.connect(self.hang_up_call)
-            self.call_window.show()
-        except Exception as e:
-            self.show_error(f"Ошибка инициализации аудио: {e}")
-            self.hang_up_call()
+    def handle_server_message(self, response):
+        msg_type = response.get('type')
+        
+        if msg_type == 'user_list':
+            self.update_user_list(response.get('users', []))
+        elif msg_type == 'text_message':
+            sender = response.get('sender', 'Сервер')
+            text = response.get('text', '')
+            self.add_message_to_box(f"{sender}: {text}")
+        elif msg_type == 'server_broadcast':
+            text = response.get('text', '')
+            self.plugin_manager.trigger_hook('on_server_broadcast', text=text)
+            self.add_message_to_box(f"СЕРВЕР: {text}")
 
-    def hang_up_call(self, notify_peer=True):
-        """Завершает текущий звонок."""
-        # Уведомляем другого пользователя о завершении, если мы инициатор
-        if self.mode == 'p2p' and notify_peer and self.call_window:
-            target_user = self.call_window.windowTitle().replace("Звонок с ", "")
-            self.p2p_manager.send_peer_command(target_user, 'p2p_hang_up', {})
+    def p2p_message_received(self, data):
+        msg_type = data.get('type')
+        sender = data.get('sender')
+        
+        if msg_type == 'text_message':
+            self.add_message_to_box(f"{sender}: {data.get('text')}")
 
+    def add_peer(self, username, address_info):
+        if username == self.username: return
+        items = self.users_list.findItems(username, Qt.MatchFlag.MatchExactly)
+        if not items:
+            self.users_list.addItem(username)
+            self.add_message_to_box(f"Система: {username} в сети.")
+
+    def remove_peer(self, username):
+        items = self.users_list.findItems(username, Qt.MatchFlag.MatchExactly)
+        for item in items:
+            self.users_list.takeItem(self.users_list.row(item))
+        self.add_message_to_box(f"Система: {username} вышел из сети.")
+
+    def search_peer_in_dht(self):
+        peer_name = self.peer_search_input.text()
+        if peer_name and peer_name != self.username:
+            self.add_message_to_box(f"Система: Ищем {peer_name} в DHT...")
+            self.p2p_manager.find_peer(peer_name)
+            self.peer_search_input.clear()
+
+    # --- Логика звонков ---
+    def initiate_call(self):
+        if self.audio_thread:
+            self.show_error("Вы уже в звонке.")
+            return
+            
+        selected_items = self.users_list.selectedItems()
+        if not selected_items:
+            self.show_error("Выберите пользователя для звонка.")
+            return
+            
+        target_username = selected_items[0].text()
+        self.pending_call_target = target_username
+        
+        self.add_message_to_box(f"Система: Начинаем установку соединения с {target_username} (NAT Traversal)...")
+        self.p2p_manager.initiate_hole_punch(target_username)
+
+    def on_hole_punch_success(self, username, public_address):
+        """Вызывается, когда hole punching удался."""
+        # Если мы инициатор звонка
+        if self.pending_call_target == username:
+            self.add_message_to_box(f"Система: Соединение с {username} установлено по адресу {public_address}. Отправляем запрос на звонок...")
+            self.current_peer_addr = (public_address[0], public_address[1])
+            self.p2p_manager.send_p2p_call_request(username)
+        # Если мы отвечаем на звонок, то hole punch был инициирован в handle_p2p_call_request
+        # и теперь мы можем отправить ответ, что готовы к звонку
+        elif self.current_peer_addr: # current_peer_addr устанавливается в handle_p2p_call_request
+             self.add_message_to_box(f"Система: Двустороннее соединение с {username} установлено. Отвечаем на звонок...")
+             self.p2p_manager.send_p2p_call_response(username, 'accept')
+
+
+    def handle_p2p_call_request(self, sender_username):
+        if self.audio_thread:
+            self.p2p_manager.send_p2p_call_response(sender_username, 'busy')
+            return
+
+        reply = QMessageBox.question(self, 'Входящий звонок',
+                                     f'{sender_username} звонит вам. Ответить?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.add_message_to_box(f"Система: Принят звонок от {sender_username}. Начинаем NAT Traversal...")
+            # Сохраняем имя, чтобы после успешного hole punch отправить 'accept'
+            self.current_peer_addr = True # Флаг, что мы в процессе ответа
+            self.p2p_manager.initiate_hole_punch(sender_username)
+        else:
+            self.p2p_manager.send_p2p_call_response(sender_username, 'reject')
+
+    def handle_p2p_call_response(self, sender_username, response):
+        if response == 'accept':
+            if self.pending_call_target == sender_username:
+                self.add_message_to_box(f"Система: {sender_username} принял ваш звонок. Начинаем разговор.")
+                self.start_audio_stream(sender_username)
+        elif response == 'reject':
+            self.add_message_to_box(f"Система: {sender_username} отклонил ваш звонок.")
+            self.pending_call_target = None
+            self.current_peer_addr = None
+        elif response == 'busy':
+            self.add_message_to_box(f"Система: {sender_username} занят.")
+            self.pending_call_target = None
+            self.current_peer_addr = None
+
+    def start_audio_stream(self, peer_username):
+        if not self.current_peer_addr or not isinstance(self.current_peer_addr, tuple):
+             self.show_error(f"Ошибка: Не удалось определить адрес для звонка с {peer_username}.")
+             self.pending_call_target = None
+             return
+
+        self.audio_thread = AudioThread(self.udp_socket, self.current_peer_addr)
+        self.audio_thread.start()
+        
+        self.call_window = CallWindow(peer_username, self)
+        self.call_window.hang_up_pressed.connect(self.hang_up_call)
+        self.call_window.show()
+        self.pending_call_target = None # Сбрасываем, так как звонок начался
+
+    def hang_up_call(self):
         if self.audio_thread:
             self.audio_thread.stop()
-            self.audio_thread.wait()
             self.audio_thread = None
+            
+            # Найти имя пользователя по адресу
+            peer_username = self.p2p_manager.get_peer_username_by_addr(self.current_peer_addr)
+            if peer_username:
+                self.p2p_manager.send_p2p_hang_up(peer_username)
+
+            self.add_message_to_box("Система: Звонок завершен.")
         
         if self.call_window:
             self.call_window.close()
             self.call_window = None
-        
-        self.udp_socket = None
+            
         self.current_peer_addr = None
-        self.add_message_to_box("Система: Звонок завершен.")
 
-    def create_udp_socket(self):
-        """Создает и возвращает UDP сокет."""
-        try:
-            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            udp_sock.bind(('', 0)) # Привязать к любому доступному порту
-            return udp_sock
-        except socket.error as e:
-            self.show_error(f"Не удалось создать UDP сокет: {e}")
-            return None
+    def handle_p2p_hang_up(self, sender_username):
+        self.add_message_to_box(f"Система: {sender_username} завершил звонок.")
+        if self.audio_thread:
+            self.audio_thread.stop()
+            self.audio_thread = None
+        if self.call_window:
+            self.call_window.close()
+            self.call_window = None
+        self.current_peer_addr = None
 
-    def update_user_list(self, users_data):
-       """Обновляет список пользователей в GUI, включая их статусы."""
-       self.users_list.clear()
-       # Сначала добавляем себя в список
-       my_status = '😀' # Статус по умолчанию, если что-то пойдет не так
-       for user_info in users_data:
-           if user_info['username'] == self.username:
-               my_status = user_info['status']
-               break
-       self.users_list.addItem(f"{my_status} {self.username} (Вы)")
+    # --- Вспомогательные функции ---
+    def add_message_to_box(self, message):
+        self.chat_box.append(message)
 
-       # Затем добавляем остальных
-       for user_info in users_data:
-           if user_info['username'] != self.username:
-               self.users_list.addItem(f"{user_info['status']} {user_info['username']}")
-
-    # --- Слоты и обработчики ---
+    def update_user_list(self, users):
+        self.users_list.clear()
+        for user in users:
+            self.users_list.addItem(user)
 
     def open_emoji_panel(self):
         panel = EmojiPanel(self)
         panel.emoji_selected.connect(self.insert_emoji)
-        # Позиционируем панель рядом с кнопкой
-        button_pos = self.emoji_button.mapToGlobal(self.emoji_button.rect().bottomLeft())
-        panel.move(button_pos)
         panel.exec()
 
     def insert_emoji(self, emoji):
-        self.msg_entry.insert(emoji)
-        self.msg_entry.setFocus()
-
-    def add_message_to_box(self, message):
-       self.chat_box.append(message)
-
-    def display_new_message(self, data):
-       """Отображает входящее текстовое сообщение в чате."""
-       sender = data.get('sender', 'Система')
-       text = data.get('text', '')
-       self.add_message_to_box(f"<b>{sender}:</b> {text}")
-
+        current_text = self.msg_entry.text()
+        self.msg_entry.setText(current_text + emoji)
 
     def change_status(self):
-       """Открывает панель эмодзи для смены статуса."""
-       panel = EmojiPanel(self)
-       panel.emoji_selected.connect(self.set_new_status)
-       button_pos = self.status_button.mapToGlobal(self.status_button.rect().bottomLeft())
-       panel.move(button_pos)
-       panel.exec()
+        # Заглушка
+        self.add_message_to_box("Система: Функция смены статуса еще не реализована.")
 
-    def set_new_status(self, emoji):
-       """Отправляет команду на сервер для обновления статуса."""
-       if self.mode == 'server':
-           self.send_command('set_status', {'status_emoji': emoji})
+    def toggle_theme(self):
+        self.current_theme = 'dark' if self.current_theme == 'light' else 'light'
+        self.apply_theme()
 
-    def p2p_message_received(self, username, text):
-        self.add_message_to_box(f"{username}: {text}")
+    def apply_theme(self):
+        if self.current_theme == 'dark':
+            self.setStyleSheet("""
+                QMainWindow, QWidget {
+                    background-color: #2b2b2b;
+                    color: #f0f0f0;
+                }
+                QTextEdit, QLineEdit {
+                    background-color: #3c3f41;
+                    color: #f0f0f0;
+                    border: 1px solid #555;
+                }
+                QPushButton {
+                    background-color: #555;
+                    color: #f0f0f0;
+                    border: 1px solid #666;
+                    padding: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #666;
+                }
+                QListWidget {
+                    background-color: #3c3f41;
+                    color: #f0f0f0;
+                }
+            """)
+        else: # light
+            self.setStyleSheet("") # Сброс к стилю по умолчанию
 
-    # --- Обработчики P2P звонков ---
-
-    def handle_p2p_call_request(self, from_user, payload):
-        """Обработка входящего P2P звонка."""
-        udp_port = payload.get('udp_port')
-        peer_ip = self.p2p_manager.peers.get(from_user)[0]
-        self.current_peer_addr = (peer_ip, udp_port)
-
-        reply = QMessageBox.question(self, 'Входящий P2P звонок',
-                                     f"Вам звонит {from_user}. Принять?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self.udp_socket = self.create_udp_socket()
-            if not self.udp_socket: return
-            
-            _, my_udp_port = self.udp_socket.getsockname()
-            self.p2p_manager.send_peer_command(from_user, 'p2p_call_response', {
-                'answer': 'accept',
-                'udp_port': my_udp_port
-            })
-            self.start_call_session(from_user, self.current_peer_addr)
-        else:
-            self.p2p_manager.send_peer_command(from_user, 'p2p_call_response', {'answer': 'reject'})
-            self.current_peer_addr = None
-
-    def handle_p2p_call_response(self, from_user, payload):
-        """Обработка ответа на P2P звонок."""
-        answer = payload.get('answer')
-        if answer == 'accept':
-            udp_port = payload.get('udp_port')
-            peer_ip = self.p2p_manager.peers.get(from_user)[0]
-            self.current_peer_addr = (peer_ip, udp_port)
-            
-            self.add_message_to_box(f"Система: {from_user} принял ваш звонок. Соединение...")
-            self.start_call_session(from_user, self.current_peer_addr)
-        else:
-            self.add_message_to_box(f"Система: {from_user} отклонил ваш звонок.")
-            self.hang_up_call(notify_peer=False)
-
-    def handle_p2p_hang_up(self, from_user):
-        """Обработка завершения звонка со стороны другого пира."""
-        self.add_message_to_box(f"Система: {from_user} завершил звонок.")
-        self.hang_up_call(notify_peer=False)
-
-    def handle_connection_lost(self):
-        self.add_message_to_box("Система: Соединение с сервером потеряно.")
-        self.disable_input()
-
-    def add_peer(self, username, address):
-        self.add_message_to_box(f"Система: {username} теперь в сети.")
-        self.users_list.addItem(username)
-
-    def remove_peer(self, username):
-        self.add_message_to_box(f"Система: {username} покинул сеть.")
-        items = self.users_list.findItems(username, Qt.MatchFlag.MatchExactly)
-        for item in items:
-            self.users_list.takeItem(self.users_list.row(item))
-
-    def search_peer_in_dht(self):
-        """Инициирует поиск пира в DHT."""
-        username_to_find = self.peer_search_input.text()
-        if not username_to_find or username_to_find == self.username:
-            return
-        
-        self.add_message_to_box(f"Система: Идет поиск {username_to_find} в сети DHT...")
-        if self.p2p_manager:
-            # Этот вызов должен быть асинхронным или выполняться в потоке
-            # P2PManager'а, чтобы не блокировать GUI.
-            self.p2p_manager.find_peer(username_to_find)
-        self.peer_search_input.clear()
+    def show_error(self, message):
+        QMessageBox.critical(self, "Ошибка", message)
 
     def enable_input(self):
         self.msg_entry.setEnabled(True)
@@ -713,68 +618,39 @@ class ChatWindow(QMainWindow):
         self.msg_entry.setEnabled(False)
         self.send_button.setEnabled(False)
 
-    def show_error(self, message):
-        QMessageBox.critical(self, "Ошибка", message)
-
-    def toggle_theme(self):
-       """Переключает между светлой и темной темой."""
-       self.current_theme = 'dark' if self.current_theme == 'light' else 'light'
-       self.apply_theme()
-
-    def apply_theme(self):
-       """Применяет выбранную тему к приложению."""
-       if self.current_theme == 'dark':
-           self.setStyleSheet("""
-               QWidget {
-                   background-color: #2b2b2b;
-                   color: #ffffff;
-                   border: 1px solid #4f4f4f;
-               }
-               QMainWindow, QDialog {
-                   background-color: #2b2b2b;
-               }
-               QTextEdit, QLineEdit, QListWidget {
-                   background-color: #3c3c3c;
-                   color: #ffffff;
-                   border: 1px solid #555555;
-               }
-               QPushButton {
-                   background-color: #555555;
-                   color: #ffffff;
-                   border: 1px solid #666666;
-                   padding: 5px;
-               }
-               QPushButton:hover {
-                   background-color: #666666;
-               }
-               QPushButton:pressed {
-                   background-color: #777777;
-               }
-               QLabel {
-                   border: none;
-               }
-           """)
-       else: # light theme
-           self.setStyleSheet("") # Сбрасываем на стиль по умолчанию
+    def handle_connection_lost(self):
+        if self.network_thread:
+            self.network_thread.stop()
+            self.network_thread = None
+        self.show_error("Соединение с сервером потеряно.")
+        self.disable_input()
+        self.update_user_list([])
 
     def closeEvent(self, event):
-        self.hang_up_call() # Завершаем звонок, если он активен
         if self.network_thread:
             self.network_thread.stop()
         if self.p2p_manager:
             self.p2p_manager.stop()
+        if self.audio_thread:
+            self.hang_up_call()
+        if self.udp_socket:
+            self.udp_socket.close()
         event.accept()
 
-# --- Точка входа ---
-
-if __name__ == "__main__":
+def main():
     app = QApplication(sys.argv)
     
+    # Запускаем диалог выбора режима
     mode_dialog = ModeSelectionDialog()
-    if mode_dialog.exec():
+    if mode_dialog.exec() == QDialog.DialogCode.Accepted:
         mode = mode_dialog.result
-        window = ChatWindow(mode)
-        window.show()
-        sys.exit(app.exec())
+        if mode:
+            window = ChatWindow(mode=mode)
+            window.show()
+            sys.exit(app.exec())
     else:
+        # Пользователь закрыл диалог, ничего не делаем
         sys.exit(0)
+
+if __name__ == '__main__':
+    main()
