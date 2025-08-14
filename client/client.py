@@ -7,15 +7,15 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QLineEdit,
                              QDialog, QLabel, QFormLayout, QListWidget, QHBoxLayout, QSplitter,
                              QInputDialog, QGridLayout)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize
-from PyQt6.QtGui import QMovie
 import pyaudio
 
 # Проверяем, существуют ли файлы, и импортируем их
 try:
     from config_manager import ConfigManager
     from p2p_manager import P2PManager
+    from plugin_manager import PluginManager
 except ImportError:
-    print("Ошибка: Не найдены модули config_manager.py или p2p_manager.py")
+    print("Ошибка: Не найдены модули config_manager.py, p2p_manager.py или plugin_manager.py")
     sys.exit(1)
 
 
@@ -83,67 +83,33 @@ class EmojiPanel(QDialog):
         self.emoji_selected.emit(emoji)
         self.accept()
 
-class GifPanel(QDialog):
-   """Панель для выбора GIF."""
-   gif_selected = pyqtSignal(str)
-
-   def __init__(self, parent=None):
-       super().__init__(parent)
-       self.setWindowTitle("Выберите GIF")
-       self.setFixedSize(400, 300)
-       
-       self.layout = QGridLayout(self)
-       
-       # TODO: Загружать гифки из сети или локально
-       gifs = ["gif1.gif", "gif2.gif"] # Заглушки
-       
-       row, col = 0, 0
-       for gif_path in gifs:
-           label = QLabel()
-           movie = QMovie(gif_path)
-           label.setMovie(movie)
-           movie.start()
-           
-           button = QPushButton("Выбрать")
-           button.clicked.connect(lambda _, p=gif_path: self.select_gif(p))
-           
-           container = QWidget()
-           container_layout = QVBoxLayout(container)
-           container_layout.addWidget(label)
-           container_layout.addWidget(button)
-           
-           self.layout.addWidget(container, row, col)
-           col += 1
-           if col > 2:
-               col = 0
-               row += 1
-
-   def select_gif(self, gif_path):
-       self.gif_selected.emit(gif_path)
-       self.accept()
 
 class ModeSelectionDialog(QDialog):
-    """Диалог для выбора режима P2P или Клиент-Сервер."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Выбор режима")
-        self.layout = QVBoxLayout(self)
-        self.result = None
+   """Диалог для выбора режима работы."""
+   def __init__(self, parent=None):
+       super().__init__(parent)
+       self.setWindowTitle("Выбор режима")
+       self.layout = QVBoxLayout(self)
+       self.result = None
 
-        self.label = QLabel("Выберите режим работы мессенджера:")
-        self.layout.addWidget(self.label)
+       self.label = QLabel("Выберите режим работы мессенджера:")
+       self.layout.addWidget(self.label)
 
-        self.server_button = QPushButton("Клиент-Сервер (Интернет)")
-        self.server_button.clicked.connect(lambda: self.set_mode('server'))
-        self.layout.addWidget(self.server_button)
+       self.server_button = QPushButton("Клиент-Сервер")
+       self.server_button.clicked.connect(lambda: self.set_mode('server'))
+       self.layout.addWidget(self.server_button)
 
-        self.p2p_button = QPushButton("P2P (Локальная сеть)")
-        self.p2p_button.clicked.connect(lambda: self.set_mode('p2p'))
-        self.layout.addWidget(self.p2p_button)
+       self.p2p_internet_button = QPushButton("P2P (Интернет)")
+       self.p2p_internet_button.clicked.connect(lambda: self.set_mode('p2p_internet'))
+       self.layout.addWidget(self.p2p_internet_button)
 
-    def set_mode(self, mode):
-        self.result = mode
-        self.accept()
+       self.p2p_local_button = QPushButton("P2P (Локальная сеть)")
+       self.p2p_local_button.clicked.connect(lambda: self.set_mode('p2p_local'))
+       self.layout.addWidget(self.p2p_local_button)
+
+   def set_mode(self, mode):
+       self.result = mode
+       self.accept()
 
 class LoginDialog(QDialog):
     """Диалоговое окно для входа и регистрации в серверном режиме."""
@@ -270,6 +236,7 @@ class ChatWindow(QMainWindow):
         self.network_thread = None
         self.p2p_manager = None
         self.sock = None
+        self.plugin_manager = PluginManager(plugin_folder='VoiceChat/plugins')
         
         # Для звонков
         self.udp_socket = None
@@ -280,11 +247,12 @@ class ChatWindow(QMainWindow):
 
         self.setup_ui()
         self.apply_theme() # Применяем тему по умолчанию
+        self.plugin_manager.discover_plugins()
         self.initialize_mode()
 
     def setup_ui(self):
         """Настраивает основной интерфейс окна."""
-        self.setWindowTitle(f"Мессенджер ({'P2P' if self.mode == 'p2p' else 'Клиент-Сервер'})")
+        self.setWindowTitle(f"JustMessenger ({self.mode.replace('_', ' ').title()})")
         self.setGeometry(100, 100, 500, 600)
         
         self.central_widget = QWidget()
@@ -306,16 +274,11 @@ class ChatWindow(QMainWindow):
         self.emoji_button.setFixedSize(QSize(40, 28))
         self.emoji_button.clicked.connect(self.open_emoji_panel)
 
-        self.gif_button = QPushButton("GIF")
-        self.gif_button.setFixedSize(QSize(40, 28))
-        self.gif_button.clicked.connect(self.open_gif_panel)
-
         self.send_button = QPushButton("Отправить")
         self.send_button.clicked.connect(self.send_message)
         
         input_layout.addWidget(self.msg_entry)
         input_layout.addWidget(self.emoji_button)
-        input_layout.addWidget(self.gif_button)
         input_layout.addWidget(self.send_button)
 
         chat_layout.addWidget(self.chat_box)
@@ -326,6 +289,20 @@ class ChatWindow(QMainWindow):
         users_layout = QVBoxLayout(users_widget)
         self.users_list = QListWidget()
         users_layout.addWidget(QLabel("Пользователи в сети:"))
+        
+        # --- Панель поиска для DHT ---
+        self.peer_search_widget = QWidget()
+        peer_search_layout = QHBoxLayout(self.peer_search_widget)
+        peer_search_layout.setContentsMargins(0, 0, 0, 0)
+        self.peer_search_input = QLineEdit()
+        self.peer_search_input.setPlaceholderText("Имя пользователя для поиска")
+        self.peer_search_button = QPushButton("Найти")
+        peer_search_layout.addWidget(self.peer_search_input)
+        peer_search_layout.addWidget(self.peer_search_button)
+        self.peer_search_widget.setVisible(False) # Скрыто по умолчанию
+        users_layout.addWidget(self.peer_search_widget)
+        # --- Конец панели поиска ---
+
         users_layout.addWidget(self.users_list)
         
         self.status_button = QPushButton("Сменить статус")
@@ -345,12 +322,14 @@ class ChatWindow(QMainWindow):
 
     def initialize_mode(self):
         """Инициализирует логику в зависимости от выбранного режима."""
-        if self.mode == 'p2p':
-            self.init_p2p_mode()
+        if self.mode == 'p2p_local':
+            self.init_p2p_mode(local=True)
+        elif self.mode == 'p2p_internet':
+            self.init_p2p_mode(local=False)
         else:
             self.init_server_mode()
 
-    def init_p2p_mode(self):
+    def init_p2p_mode(self, local=True):
         """Настройка для P2P режима."""
         # Добавляем кнопку звонка
         self.call_button = QPushButton("📞 Позвонить")
@@ -372,7 +351,7 @@ class ChatWindow(QMainWindow):
                 sys.exit()
         
         self.setWindowTitle(f"Мессенджер (P2P) - {self.username}")
-        self.p2p_manager = P2PManager(self.username)
+        self.p2p_manager = P2PManager(self.username, local=local)
         self.p2p_manager.peer_discovered.connect(self.add_peer)
         self.p2p_manager.peer_lost.connect(self.remove_peer)
         self.p2p_manager.message_received.connect(self.p2p_message_received)
@@ -381,7 +360,13 @@ class ChatWindow(QMainWindow):
         self.p2p_manager.p2p_call_response.connect(self.handle_p2p_call_response)
         self.p2p_manager.p2p_hang_up.connect(self.handle_p2p_hang_up)
         self.p2p_manager.start()
-        self.add_message_to_box("Система: Вы в режиме P2P. Идет поиск других пользователей...")
+        if local:
+            self.add_message_to_box("Система: Вы в режиме P2P (Локальная сеть). Идет поиск других пользователей...")
+        else:
+            self.add_message_to_box("Система: Вы в режиме P2P (Интернет). Используйте поиск, чтобы найти пользователей.")
+            self.peer_search_widget.setVisible(True)
+            self.peer_search_button.clicked.connect(self.search_peer_in_dht)
+            self.peer_search_input.returnPressed.connect(self.search_peer_in_dht)
 
     def init_server_mode(self):
         """Настройка для Клиент-Серверного режима."""
@@ -499,7 +484,16 @@ class ChatWindow(QMainWindow):
         message = self.msg_entry.text()
         if not message: return
 
-        if self.mode == 'p2p':
+        # --- Plugin Hook ---
+        # Позволяет плагинам перехватывать или изменять сообщение.
+        # Если хук возвращает False, сообщение не отправляется.
+        continue_sending = self.plugin_manager.trigger_hook('before_send_message', message=message)
+        if continue_sending is False:
+            self.msg_entry.clear()
+            return
+        # --- End Plugin Hook ---
+
+        if self.mode.startswith('p2p'):
             self.p2p_manager.broadcast_message(message)
             self.add_message_to_box(f"Вы: {message}")
         else: # server mode
@@ -614,49 +608,14 @@ class ChatWindow(QMainWindow):
         self.msg_entry.setFocus()
 
     def add_message_to_box(self, message):
-       # Проверяем, является ли сообщение HTML-тегом img
-       if message.strip().startswith('<img'):
-           # Для GIF-ов и изображений просто вставляем HTML
-           self.chat_box.append(message)
-       else:
-           # Для обычного текста экранируем HTML-символы
-           self.chat_box.append(message.replace('&', '&').replace('<', '<').replace('>', '>'))
+       self.chat_box.append(message)
 
     def display_new_message(self, data):
-       """Отображает входящее сообщение в чате (текст или GIF)."""
+       """Отображает входящее текстовое сообщение в чате."""
        sender = data.get('sender', 'Система')
-       msg_type = data.get('type', 'text')
+       text = data.get('text', '')
+       self.add_message_to_box(f"<b>{sender}:</b> {text}")
 
-       if msg_type == 'text':
-           text = data.get('text', '')
-           self.add_message_to_box(f"<b>{sender}:</b> {text}")
-       elif msg_type == 'gif':
-           gif_path = data.get('gif_path')
-           if gif_path:
-               self.add_message_to_box(f"<b>{sender}</b> отправил GIF:")
-               # Используем HTML для отображения GIF
-               self.add_message_to_box(f'<img src="{gif_path}" width="150" />')
-
-    def open_gif_panel(self):
-       """Открывает панель выбора GIF."""
-       panel = GifPanel(self)
-       panel.gif_selected.connect(self.send_gif)
-       button_pos = self.gif_button.mapToGlobal(self.gif_button.rect().bottomLeft())
-       panel.move(button_pos)
-       panel.exec()
-
-    def send_gif(self, gif_path):
-       """Отправляет GIF как сообщение."""
-       if self.mode == 'server':
-           self.send_command('send_message', {'type': 'gif', 'gif_path': gif_path})
-       elif self.mode == 'p2p':
-           # TODO: Реализовать P2P отправку GIF (потребует передачи файла)
-           self.add_message_to_box("<i>Отправка GIF в P2P режиме пока не реализована.</i>")
-           return
-       
-       # Локальное отображение отправленного GIF
-       self.add_message_to_box(f"<b>Вы</b> отправили GIF:")
-       self.add_message_to_box(f'<img src="{gif_path}" width="150" />')
 
     def change_status(self):
        """Открывает панель эмодзи для смены статуса."""
@@ -732,6 +691,19 @@ class ChatWindow(QMainWindow):
         items = self.users_list.findItems(username, Qt.MatchFlag.MatchExactly)
         for item in items:
             self.users_list.takeItem(self.users_list.row(item))
+
+    def search_peer_in_dht(self):
+        """Инициирует поиск пира в DHT."""
+        username_to_find = self.peer_search_input.text()
+        if not username_to_find or username_to_find == self.username:
+            return
+        
+        self.add_message_to_box(f"Система: Идет поиск {username_to_find} в сети DHT...")
+        if self.p2p_manager:
+            # Этот вызов должен быть асинхронным или выполняться в потоке
+            # P2PManager'а, чтобы не блокировать GUI.
+            self.p2p_manager.find_peer(username_to_find)
+        self.peer_search_input.clear()
 
     def enable_input(self):
         self.msg_entry.setEnabled(True)

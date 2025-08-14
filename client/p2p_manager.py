@@ -2,7 +2,10 @@ import socket
 import threading
 import time
 import json
-from PyQt6.QtCore import QObject, pyqtSignal
+import asyncio
+from PyQt6.QtCore import QObject, pyqtSignal, QMetaObject, Qt
+
+from kademlia.network import Server as KademliaServer
 
 P2P_PORT = 12346  # Отдельный порт для P2P
 BROADCAST_ADDR = '<broadcast>'
@@ -16,34 +19,55 @@ class P2PManager(QObject):
     p2p_call_response = pyqtSignal(str, dict) # from_username, payload
     p2p_hang_up = pyqtSignal(str) # from_username
 
-    def __init__(self, username):
+    def __init__(self, username, mode='internet'):
         super().__init__()
         self.username = username
+        self.mode = mode # 'internet' or 'local'
         self.peers = {} # {username: (address, last_seen_time)}
         self.running = True
+        self.dht_node = None
+        self.dht_thread = None
+        self.dht_loop = None
         
         # Находим свой локальный IP, чтобы не добавлять себя в пиры
         self.my_ip = self._get_local_ip()
 
-        # Поток для отправки "приветствий"
-        self.broadcast_thread = threading.Thread(target=self.send_discovery_broadcast)
-        self.broadcast_thread.daemon = True
+        if self.mode == 'local':
+            self.dht_node = None
+            self.dht_thread = None
+            # Потоки для локальной сети
+            self.broadcast_thread = threading.Thread(target=self.send_discovery_broadcast)
+            self.listen_thread = threading.Thread(target=self.listen_for_peers)
+            self.check_thread = threading.Thread(target=self.check_peers)
+        else: # internet mode
+            self.broadcast_thread = None
+            self.listen_thread = None
+            self.check_thread = None
+            # Для интернет-режима инициализируем DHT
+            self.dht_node = KademliaServer()
+            self.dht_thread = threading.Thread(target=self._run_dht)
 
-        # Поток для прослушивания "приветствий"
-        self.listen_thread = threading.Thread(target=self.listen_for_peers)
-        self.listen_thread.daemon = True
-        
-        # Поток для проверки "мертвых" пиров
-        self.check_thread = threading.Thread(target=self.check_peers)
-        self.check_thread.daemon = True
+        if self.broadcast_thread: self.broadcast_thread.daemon = True
+        if self.listen_thread: self.listen_thread.daemon = True
+        if self.check_thread: self.check_thread.daemon = True
+        if self.dht_thread: self.dht_thread.daemon = True
 
     def start(self):
-        self.listen_thread.start()
-        self.broadcast_thread.start()
-        self.check_thread.start()
+        if self.mode == 'local':
+            if self.listen_thread: self.listen_thread.start()
+            if self.broadcast_thread: self.broadcast_thread.start()
+            if self.check_thread: self.check_thread.start()
+        else:
+            # Запускаем поток для DHT
+            if self.dht_thread: self.dht_thread.start()
 
     def stop(self):
         self.running = False
+        if self.dht_node:
+            # Kademlia работает в asyncio, поэтому остановка должна быть неблокирующей
+            # В реальной реализации может потребоваться более сложная логика
+            print("Остановка DHT узла...")
+            # self.dht_node.stop() # У реальной библиотеки может быть такой метод
 
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -164,3 +188,68 @@ class P2PManager(QObject):
             print(f"Не удалось отправить команду пиру {target_username}: {e}")
         finally:
             sock.close()
+
+    # --- Методы для работы с DHT (для режима P2P-Интернет) ---
+
+    def _run_dht(self):
+        """Запускает и управляет event loop'ом для asyncio DHT."""
+        self.dht_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.dht_loop)
+        self.dht_loop.run_until_complete(self._dht_main())
+
+    async def _dht_main(self):
+        """Основная асинхронная задача для работы с DHT."""
+        # TODO: Заменить на реальные bootstrap-узлы
+        bootstrap_nodes = [("127.0.0.1", 8468)]
+        
+        # Запускаем прослушивание на случайном порту
+        await self.dht_node.listen(P2P_PORT)
+        # Подключаемся к сети
+        await self.dht_node.bootstrap(bootstrap_nodes)
+
+        # Периодически публикуем информацию о себе и ищем других
+        while self.running:
+            # Публикуем свой адрес. Значение должно быть сериализуемым.
+            my_address_info = json.dumps((self.my_ip, P2P_PORT))
+            await self.dht_node.set(self.username, my_address_info)
+            
+            await asyncio.sleep(30) # Перепубликация каждые 30 секунд
+        
+        # await self.dht_node.stop() # У Kademlia нет stop(), она останавливается с event loop
+
+    def find_peer(self, username):
+        """
+        Инициирует поиск пира в DHT.
+        Так как поиск - асинхронная операция, мы запускаем ее в потоке DHT.
+        """
+        if self.dht_loop and self.dht_loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._async_find_peer(username), self.dht_loop)
+
+    async def _async_find_peer(self, username):
+        """Асинхронная часть поиска пира."""
+        print(f"[DHT] Ищем пользователя {username}...")
+        found_value = await self.dht_node.get(username)
+        if found_value:
+            print(f"[DHT] Найден {username} с данными: {found_value}")
+            try:
+                # Данные хранятся как JSON-строка "(ip, port)"
+                user_ip, user_port = json.loads(found_value)
+                
+                # Обновляем наш локальный список пиров
+                self.peers[username] = (user_ip, time.time())
+                
+                # Безопасно отправляем сигнал в главный поток GUI
+                QMetaObject.invokeMethod(
+                    self, "emit_peer_discovered", Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, username), Q_ARG(str, user_ip)
+                )
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                print(f"Ошибка парсинга данных для {username}: {e}")
+        else:
+            print(f"[DHT] Пользователь {username} не найден.")
+            # TODO: Сообщить пользователю в GUI, что пир не найден
+
+    @pyqtSlot(str, str)
+    def emit_peer_discovered(self, username, address):
+        """Слот для безопасного вызова сигнала из другого потока."""
+        self.peer_discovered.emit(username, address)
