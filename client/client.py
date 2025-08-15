@@ -6,7 +6,7 @@ import pyaudio
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QLineEdit,
                              QPushButton, QVBoxLayout, QWidget, QMessageBox,
                              QDialog, QLabel, QFormLayout, QListWidget, QHBoxLayout, QSplitter,
-                             QInputDialog, QGridLayout)
+                             QInputDialog, QGridLayout, QComboBox, QMenu, QTabWidget, QScrollArea)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize, QMetaObject
 
 # Проверяем, существуют ли файлы, и импортируем их
@@ -34,54 +34,131 @@ RATE = 44100
 class CallWindow(QDialog):
     """Окно активного звонка."""
     hang_up_pressed = pyqtSignal()
+    mute_toggled = pyqtSignal(bool)
 
     def __init__(self, peer_username, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Звонок с {peer_username}")
-        self.setFixedSize(300, 150)
+        self.setFixedSize(300, 180)
+        self.muted = False
         
         self.layout = QVBoxLayout(self)
         self.label = QLabel(f"Идет разговор с {peer_username}...")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.mute_button = QPushButton("Выключить микрофон")
+        self.mute_button.setCheckable(True)
+        self.mute_button.clicked.connect(self.toggle_mute)
+
         self.hang_up_button = QPushButton("Завершить звонок")
         
         self.layout.addWidget(self.label)
+        self.layout.addWidget(self.mute_button)
         self.layout.addWidget(self.hang_up_button)
         
         self.hang_up_button.clicked.connect(self.hang_up_pressed.emit)
         self.hang_up_pressed.connect(self.accept) # Закрыть окно при нажатии
 
-class EmojiPanel(QDialog):
+    def toggle_mute(self, checked):
+        self.muted = checked
+        self.mute_button.setText("Включить микрофон" if self.muted else "Выключить микрофон")
+        self.mute_toggled.emit(self.muted)
+
+class EmojiPanel(QWidget):
     """Панель для выбора эмодзи."""
     emoji_selected = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Выберите эмодзи")
-        self.setFixedSize(300, 200)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
         
-        self.layout = QGridLayout(self)
+        self.tabs = QTabWidget()
+        self.layout.addWidget(self.tabs)
         
-        emojis = [
-            '😀', '😂', '😍', '🤔', '👍', '👎', '❤️', '🔥',
-            '🚀', '🎉', '👋', '😢', '😠', '🙏', '💻', '🍕'
-        ]
+        self.emojis = {
+            "Smileys & People": [
+                '😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '😊', '😇', '🙂', '🙃', '😉', '😌', '😍', '🥰',
+                '😘', '😗', '😙', '😚', '😋', '😛', '😝', '😜', '🤪', '🤨', '🧐', '🤓', '😎', '🤩', '🥳', '😏',
+                '😒', '😞', '😔', '😟', '😕', '🙁', '☹️', '😣', '😖', '😫', '😩', '🥺', '😢', '😭', '😤', '😠',
+                '😡', '🤬', '🤯', '😳', '🥵', '🥶', '😱', '😨', '😰', '😥', '😓', '🤗', '🤔', '🤭', '🤫', '🤥',
+                '😶', '😐', '😑', '😬', '🙄', '😯', '😦', '😧', '😮', '😲', '🥱', '😴', '🤤', '😪', '😵', '🤐',
+                '🥴', '🤢', '🤮', '🤧', '😷', '🤒', '🤕', '🤑', '🤠', '😈', '👿', '👹', '👺', '🤡', '💩', '👻',
+                '💀', '☠️', '👽', '👾', '🤖', '🎃', '😺', '😸', '😹', '😻', '😼', '😽', '🙀', '😿', '😾', '👋',
+                '🤚', '🖐', '✋', '🖖', '👌', '🤏', '✌️', '🤞', '🤟', '🤘', '🤙', '👈', '👉', '👆', '🖕', '👇',
+                '☝️', '👍', '👎', '✊', '👊', '🤛', '🤜', '👏', '🙌', '👐', '🤲', '🤝', '🙏', '✍️', '💅', '🤳',
+                '💪', '🦾', '🦵', '🦿', '🦶', '👂', '🦻', '👃', '🧠', '🦷', '🦴', '👀', '👁', '👅', '👄', '👶',
+                '🧒', '👦', '👧', '🧑', '👱', '👨', '🧔', '👨‍🦰', '👨‍🦱', '👨‍🦳', '👨‍🦲', '👩', '👩‍🦰', '🧑‍🦰',
+                '👩‍🦱', '🧑‍🦱', '👩‍🦳', '🧑‍🦳', '👩‍🦲', '🧑‍🦲', '👱‍♀️', '👱‍♂️', '🧓', '👴', '👵', '🙍', '🙎',
+                '🙅', '🙆', '💁', '🙋', '🧏', '🙇', '🤦', '🤷', '👮', '🕵', '💂', '👷', '🤴', '👸', '👳', '👲',
+                '🧕', '🤵', '👰', '🤰', '🤱', '👼', '🎅', '🤶', '🦸', '🦹', '🧙', '🧚', '🧛', '🧜', '🧝', '🧞',
+                '🧟', '💆', '💇', '🚶', '🧍', '🧎', '🏃', '💃', '🕺', '🕴', '👯', '🧖', '🧗', '🤺', '🏇', '⛷',
+                '🏂', '🏌', '🏄', '🚣', '🏊', '⛹', '🏋', '🚴', '🚵', '🤸', '🤼', '🤽', '🤾', '🤹', '🧘', '🛀',
+                '🛌', '🧑‍🤝‍🧑', '👭', '👫', '👬', '💏', '👩‍❤️‍💋‍👨', '👨‍❤️‍💋‍👨', '👩‍❤️‍💋‍👩', '💑', '👩‍❤️‍👨',
+                '👨‍❤️‍👨', '👩‍❤️‍👩', '👨‍👩‍👦', '👨‍👩‍👧', '👨‍👩‍👧‍👦', '👨‍👩‍👦‍👦', '👨‍👩‍👧‍👧', '👨‍👨‍👦', '👨‍👨‍👧',
+                '👨‍👨‍👧‍👦', '👨‍👨‍👦‍👦', '👨‍👨‍👧‍👧', '👩‍👩‍👦', '👩‍👩‍👧', '👩‍👩‍👧‍👦', '👩‍👩‍👦‍👦', '👩‍👩‍👧‍👧', '🗣',
+                '👤', '👥', '👣'
+            ],
+            "Animals & Nature": [
+                '🙈', '🙉', '🙊', '🐒', '🦍', '🦧', '🐶', '🐕', '🦮', '🐕‍🦺', '🐩', '🐺', '🦊', '🦝', '🐱', '🐈',
+                '🦁', '🐯', '🐅', '🐆', '🐴', '🐎', '🦄', '🦓', '🦌', '🐮', '🐂', '🐃', '🐄', '🐷', '🐖', '🐗',
+                '🐽', '🐏', '🐑', '🐐', '🐪', '🐫', '🦙', '🦒', '🐘', '🦏', '🦛', '🐭', '🐁', '🐀', '🐹', '🐰',
+                '🐇', '🐿', '🦔', '🦇', '🐻', '🐨', '🐼', '🦥', '🦦', '🦨', '🦘', '🦡', '🐾', '🦃', '🐔', '🐓',
+                '🐣', '🐤', '🐥', '🐦', '🐧', '🕊', '🦅', '🦆', '🦢', '🦉', '🦩', '🦚', '🦜', '🐸', '🐊', '🐢',
+                '🦎', '🐍', '🐲', '🐉', '🦕', '🦖', '🐳', '🐋', '🐬', '🐟', '🐠', '🐡', '🦈', '🐙', '🐚', '🐌',
+                '🦋', '🐛', '🐜', '🐝', '🐞', '🦗', '🕷', '🕸', '🦂', '🦟', '🦠', '💐', '🌸', '💮', '🏵', '🌹',
+                '🥀', '🌺', '🌻', '🌼', '🌷', '🌱', '🌲', '🌳', '🌴', '🌵', '🌾', '🌿', '☘️', '🍀', '🍁', '🍂',
+                '🍃'
+            ],
+            "Food & Drink": [
+                '🍇', '🍈', '🍉', '🍊', '🍋', '🍌', '🍍', '🥭', '🍎', '🍏', '🍐', '🍑', '🍒', '🍓', '🥝', '🍅',
+                '🥥', '🥑', '🍆', '🥔', '🥕', '🌽', '🌶', '🥒', '🥬', '🥦', '🧄', '🧅', '🍄', '🥜', '🌰', '🍞',
+                '🥐', '🥖', '🥨', '🥯', '🥞', '🧇', '🧀', '🍖', '🍗', '🥩', '🥓', '🍔', '🍟', '🍕', '🌭', '🥪',
+                '🥙', '🧆', '🌮', '🌯', '🥗', '🥘', '🥫', '🍝', '🍜', '🍲', '🍛', '🍣', '🍱', '🥟', '🦪', '🍤',
+                '🍙', '🍚', '🍘', '🍥', '🥠', '🥮', '🍢', '🍡', '🍧', '🍨', '🍦', '🥧', '🧁', '🍰', '🎂', '🍮',
+                '🍭', '🍬', '🍫', '🍿', '🍩', '🍪', '🍯', '🍼', '🥛', '☕️', '🍵', '🍶', '🍾', '🍷', '🍸', '🍹',
+                '🍺', '🍻', '🥂', '🥃', '🥤', '🧃', '🧉', '🧊', '🥢', '🍽', '🍴', '🥄'
+            ],
+            "Objects": [
+                '⌚️', '📱', '📲', '💻', '⌨️', '🖥', '🖨', '🖱', '🖲', '🕹', '🗜', '💾', '💿', '📀', '📼', '📷',
+                '📸', '📹', '🎥', '📽', '🎞', '📞', '☎️', '📟', '📠', '📺', '📻', '🎙', '🎚', '🎛', '🧭', '⏱',
+                '⏲', '⏰', '🕰', '⌛️', '⏳', '📡', '🔋', '🔌', '💡', '🔦', '🕯', '🪔', '🧯', '🛢', '💸', '💵',
+                '💴', '💶', '💷', '💰', '💳', '💎', '⚖️', '🧰', '🔧', '🔨', '⚒', '🛠', '⛏', '🔩', '⚙️', '🧱',
+                '⛓', '🧲', '🔫', '💣', '🧨', '🪓', '🔪', '🗡', '⚔️', '🛡', '🚬', '⚰️', '⚱️', '🏺', '🔮', '📿',
+                '🧿', '💈', '⚗️', '🔭', '🔬', '🕳', '🩹', '🩺', '💊', '💉', '🩸', '🧬', '🦠', '🧫', '🧪', '🌡',
+                '🧹', '🧺', '🧻', '🚽', '🚰', '🚿', '🛁', '🛀', '🧼', '🪒', '🧽', '🧴', '🛎', '🔑', '🗝', '🚪',
+                '🪑', '🛋', '🛏', '🛌', '🧸', '🖼', '🛍', '🛒', '🎁', '🎈', '🎏', '🎀', '🎊', '🎉', '🎎', '🏮',
+                '🎐', '🧧', '✉️', '📩', '📨', '📧', '💌', '📮', '📪', '📫', '📬', '📭', '📦', '📯', '📥', '📤',
+                '📜', '📃', '📑', '🧾', '📊', '📈', '📉', '🗒', '🗓', '📆', '📅', '🗑', '📇', '🗃', '🗳', '🗄',
+                '📋', '📁', '📂', '🗂', '🗞', '📰', '📓', '📔', '📒', '📕', '📗', '📘', '📙', '📚', '📖', '🔖',
+                '🧷', '🔗', '📎', '🖇', '📐', '📏', '🧮', '📌', '📍', '✂️', '🖊', '🖋', '✒️', '🖌', '🖍', '📝',
+                '✏️', '🔍', '🔎', '🔏', '🔐', '🔒', '🔓'
+            ]
+        }
         
-        row, col = 0, 0
-        for emoji in emojis:
+        for category, emoji_list in self.emojis.items():
+            self.tabs.addTab(self._create_emoji_tab(emoji_list), category)
+
+    def _create_emoji_tab(self, emoji_list):
+        tab_widget = QWidget()
+        layout = QGridLayout(tab_widget)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(tab_widget)
+        
+        col, row = 0, 0
+        for emoji in emoji_list:
             button = QPushButton(emoji)
             button.setFixedSize(40, 40)
-            button.setStyleSheet("font-size: 20px;")
-            button.clicked.connect(lambda _, e=emoji: self.select_emoji(e))
-            self.layout.addWidget(button, row, col)
+            button.setStyleSheet("font-size: 20px; border: none;")
+            button.clicked.connect(lambda _, e=emoji: self.emoji_selected.emit(e))
+            layout.addWidget(button, row, col)
             col += 1
-            if col > 5:
+            if col > 6:
                 col = 0
                 row += 1
-                
-    def select_emoji(self, emoji):
-        self.emoji_selected.emit(emoji)
-        self.accept()
+        return scroll_area
 
 
 class ModeSelectionDialog(QDialog):
@@ -109,6 +186,61 @@ class ModeSelectionDialog(QDialog):
 
    def set_mode(self, mode):
        self.result = mode
+       self.accept()
+
+class SettingsDialog(QDialog):
+   """Диалог настроек аудиоустройств."""
+   def __init__(self, config_manager, parent=None):
+       super().__init__(parent)
+       self.config_manager = config_manager
+       self.setWindowTitle("Настройки")
+       self.setFixedSize(400, 200)
+       
+       self.layout = QFormLayout(self)
+       
+       self.input_device_combo = QComboBox()
+       self.output_device_combo = QComboBox()
+       
+       self.layout.addRow("Устройство ввода (микрофон):", self.input_device_combo)
+       self.layout.addRow("Устройство вывода (динамики):", self.output_device_combo)
+       
+       self.save_button = QPushButton("Сохранить")
+       self.save_button.clicked.connect(self.save_and_close)
+       self.layout.addRow(self.save_button)
+       
+       self.populate_devices()
+       self.load_settings()
+
+   def populate_devices(self):
+       p = pyaudio.PyAudio()
+       for i in range(p.get_device_count()):
+           info = p.get_device_info_by_index(i)
+           if info.get('maxInputChannels') > 0:
+               self.input_device_combo.addItem(info.get('name'), i)
+           if info.get('maxOutputChannels') > 0:
+               self.output_device_combo.addItem(info.get('name'), i)
+       p.terminate()
+
+   def load_settings(self):
+       config = self.config_manager.load_config()
+       input_idx = config.get('input_device_index')
+       output_idx = config.get('output_device_index')
+
+       if input_idx is not None:
+           index = self.input_device_combo.findData(input_idx)
+           if index != -1:
+               self.input_device_combo.setCurrentIndex(index)
+       
+       if output_idx is not None:
+           index = self.output_device_combo.findData(output_idx)
+           if index != -1:
+               self.output_device_combo.setCurrentIndex(index)
+
+   def save_and_close(self):
+       config = self.config_manager.load_config()
+       config['input_device_index'] = self.input_device_combo.currentData()
+       config['output_device_index'] = self.output_device_combo.currentData()
+       self.config_manager.save_config(config)
        self.accept()
 
 # --- Сетевые потоки ---
@@ -148,20 +280,24 @@ class ServerNetworkThread(QThread):
 
 class AudioThread(QThread):
     """Поток для отправки и получения аудиоданных."""
-    def __init__(self, udp_socket, peer_addr):
+    def __init__(self, udp_socket, peer_addr, input_device_index=None, output_device_index=None):
         super().__init__()
         self.udp_socket = udp_socket
         self.peer_addr = peer_addr
         self.running = True
+        self.muted = False
+        self.muted_addrs = set()
         self.audio = pyaudio.PyAudio()
         
         self.output_stream = self.audio.open(format=FORMAT, channels=CHANNELS,
                                              rate=RATE, output=True,
-                                             frames_per_buffer=CHUNK)
+                                             frames_per_buffer=CHUNK,
+                                             output_device_index=output_device_index)
         
         self.input_stream = self.audio.open(format=FORMAT, channels=CHANNELS,
                                             rate=RATE, input=True,
-                                            frames_per_buffer=CHUNK)
+                                            frames_per_buffer=CHUNK,
+                                            input_device_index=input_device_index)
 
     def run(self):
         send_thread = threading.Thread(target=self.send_audio)
@@ -176,7 +312,10 @@ class AudioThread(QThread):
     def send_audio(self):
         while self.running:
             try:
-                data = self.input_stream.read(CHUNK, exception_on_overflow=False)
+                if self.muted:
+                    data = b'\x00' * CHUNK
+                else:
+                    data = self.input_stream.read(CHUNK, exception_on_overflow=False)
                 self.udp_socket.sendto(data, self.peer_addr)
             except (IOError, OSError):
                 break
@@ -184,8 +323,9 @@ class AudioThread(QThread):
     def receive_audio(self):
         while self.running:
             try:
-                data, _ = self.udp_socket.recvfrom(CHUNK * 2)
-                self.output_stream.write(data)
+                data, addr = self.udp_socket.recvfrom(CHUNK * 2)
+                if addr not in self.muted_addrs:
+                    self.output_stream.write(data)
             except (IOError, OSError):
                 break
 
@@ -206,6 +346,14 @@ class AudioThread(QThread):
         # UDP сокет закрывается в hang_up_call
         print("Аудиопоток остановлен.")
 
+    @pyqtSlot(bool)
+    def set_muted(self, muted):
+        self.muted = muted
+
+    @pyqtSlot(set)
+    def update_muted_addrs(self, addrs):
+        self.muted_addrs = addrs
+
 # --- Главное окно ---
 
 class ChatWindow(QMainWindow):
@@ -217,6 +365,7 @@ class ChatWindow(QMainWindow):
         self.network_thread = None
         self.sock = None
         self.plugin_manager = PluginManager(plugin_folder='VoiceChat/plugins')
+        self.config_manager = ConfigManager()
         
         # Для звонков
         self.udp_socket = None
@@ -225,6 +374,7 @@ class ChatWindow(QMainWindow):
         self.current_peer_addr = None
         self.pending_call_target = None # Хранит имя пользователя, которому мы пытаемся позвонить
         self.current_theme = 'light'
+        self.muted_peers = set()
 
         self.setup_ui()
         self.apply_theme()
@@ -251,7 +401,8 @@ class ChatWindow(QMainWindow):
         
         self.emoji_button = QPushButton("😀")
         self.emoji_button.setFixedSize(QSize(40, 28))
-        self.emoji_button.clicked.connect(self.open_emoji_panel)
+        self.emoji_button.setCheckable(True)
+        self.emoji_button.clicked.connect(self.toggle_emoji_panel)
 
         self.send_button = QPushButton("Отправить")
         self.send_button.clicked.connect(self.send_message)
@@ -267,6 +418,8 @@ class ChatWindow(QMainWindow):
         users_widget = QWidget()
         users_layout = QVBoxLayout(users_widget)
         self.users_list = QListWidget()
+        self.users_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.users_list.customContextMenuRequested.connect(self.show_user_context_menu)
         users_layout.addWidget(QLabel("Пользователи в сети:"))
         
         self.peer_search_widget = QWidget()
@@ -287,6 +440,11 @@ class ChatWindow(QMainWindow):
         users_layout.addWidget(self.status_button)
         self.status_button.setVisible(False)
 
+        self.emoji_panel = EmojiPanel()
+        self.emoji_panel.emoji_selected.connect(self.insert_emoji)
+        self.emoji_panel.setVisible(False)
+        users_layout.addWidget(self.emoji_panel)
+
         splitter.addWidget(users_widget)
         
         splitter.setSizes([350, 150])
@@ -294,7 +452,15 @@ class ChatWindow(QMainWindow):
 
         self.theme_button = QPushButton("Сменить тему")
         self.theme_button.clicked.connect(self.toggle_theme)
-        chat_layout.addWidget(self.theme_button)
+        
+        self.settings_button = QPushButton("Настройки")
+        self.settings_button.clicked.connect(self.open_settings)
+
+        # Добавляем кнопки в один ряд
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.theme_button)
+        button_layout.addWidget(self.settings_button)
+        chat_layout.addLayout(button_layout)
 
     def initialize_mode(self):
         if self.mode == 'p2p_local':
@@ -465,15 +631,22 @@ class ChatWindow(QMainWindow):
 
     def on_hole_punch_success(self, username, public_address):
         """Вызывается, когда hole punching удался."""
-        # Если мы инициатор звонка
+        # Эта функция вызывается и у звонящего, и у отвечающего.
+        # Нужно четко разделить их логику.
+
+        # Логика для инициатора звонка (того, кто нажал "Позвонить")
         if self.pending_call_target == username:
             self.add_message_to_box(f"Система: Соединение с {username} установлено по адресу {public_address}. Отправляем запрос на звонок...")
             self.current_peer_addr = (public_address[0], public_address[1])
             self.p2p_manager.send_p2p_call_request(username)
-        # Если мы отвечаем на звонок, то hole punch был инициирован в handle_p2p_call_request
-        # и теперь мы можем отправить ответ, что готовы к звонку
-        elif self.current_peer_addr: # current_peer_addr устанавливается в handle_p2p_call_request
+            return # Важно завершить выполнение здесь, чтобы не перейти к логике отвечающего
+
+        # Логика для отвечающего на звонок (того, кто нажал "Да" в диалоге)
+        # Флаг self.current_peer_addr == True устанавливается в handle_p2p_call_request
+        if self.current_peer_addr is True:
              self.add_message_to_box(f"Система: Двустороннее соединение с {username} установлено. Отвечаем на звонок...")
+             # Теперь у нас есть реальный адрес, сохраняем его
+             self.current_peer_addr = (public_address[0], public_address[1])
              self.p2p_manager.send_p2p_call_response(username, 'accept')
 
 
@@ -514,11 +687,21 @@ class ChatWindow(QMainWindow):
              self.pending_call_target = None
              return
 
-        self.audio_thread = AudioThread(self.udp_socket, self.current_peer_addr)
+        config = self.config_manager.load_config()
+        input_device_index = config.get('input_device_index')
+        output_device_index = config.get('output_device_index')
+
+        self.audio_thread = AudioThread(
+            self.udp_socket,
+            self.current_peer_addr,
+            input_device_index=input_device_index,
+            output_device_index=output_device_index
+        )
         self.audio_thread.start()
         
         self.call_window = CallWindow(peer_username, self)
         self.call_window.hang_up_pressed.connect(self.hang_up_call)
+        self.call_window.mute_toggled.connect(self.audio_thread.set_muted)
         self.call_window.show()
         self.pending_call_target = None # Сбрасываем, так как звонок начался
 
@@ -559,10 +742,14 @@ class ChatWindow(QMainWindow):
         for user in users:
             self.users_list.addItem(user)
 
+    def toggle_emoji_panel(self, checked):
+        self.emoji_panel.setVisible(checked)
+
     def open_emoji_panel(self):
-        panel = EmojiPanel(self)
-        panel.emoji_selected.connect(self.insert_emoji)
-        panel.exec()
+        # This method is now obsolete, but kept for compatibility in case it's called elsewhere.
+        # The new behavior is handled by toggle_emoji_panel.
+        self.emoji_button.setChecked(not self.emoji_button.isChecked())
+        self.toggle_emoji_panel(self.emoji_button.isChecked())
 
     def insert_emoji(self, emoji):
         current_text = self.msg_entry.text()
@@ -575,6 +762,51 @@ class ChatWindow(QMainWindow):
     def toggle_theme(self):
         self.current_theme = 'dark' if self.current_theme == 'light' else 'light'
         self.apply_theme()
+
+    def open_settings(self):
+        dialog = SettingsDialog(self.config_manager, self)
+        dialog.exec()
+
+    def show_user_context_menu(self, position):
+        item = self.users_list.itemAt(position)
+        if not item:
+            return
+        
+        username = item.text().split(' ')[0] # Убираем возможный статус "[Muted]"
+        
+        menu = QMenu()
+        mute_action_text = "Включить звук" if username in self.muted_peers else "Выключить звук"
+        mute_action = menu.addAction(mute_action_text)
+        
+        action = menu.exec(self.users_list.mapToGlobal(position))
+        
+        if action == mute_action:
+            self.toggle_peer_mute(username)
+
+    def toggle_peer_mute(self, username):
+        if username in self.muted_peers:
+            self.muted_peers.remove(username)
+        else:
+            self.muted_peers.add(username)
+        
+        # Обновляем отображение в списке
+        for i in range(self.users_list.count()):
+            item = self.users_list.item(i)
+            peer_name = item.text().split(' ')[0]
+            if peer_name == username:
+                item.setText(f"{username} [Muted]" if username in self.muted_peers else username)
+                break
+        
+        # Обновляем список замученных адресов в аудиопотоке
+        if self.audio_thread:
+            muted_addrs = set()
+            for peer in self.muted_peers:
+                if peer in self.p2p_manager.peers:
+                    peer_data = self.p2p_manager.peers[peer]
+                    addr = peer_data.get('public_addr') or (peer_data.get('local_ip'), 12346) # P2P_PORT
+                    if addr:
+                        muted_addrs.add(addr)
+            self.audio_thread.update_muted_addrs(muted_addrs)
 
     def apply_theme(self):
         if self.current_theme == 'dark':
