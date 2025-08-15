@@ -15,11 +15,13 @@ STUN_PORT = 19302
 class P2PManager(QObject):
     peer_discovered = pyqtSignal(str, str)
     peer_lost = pyqtSignal(str)
-    message_received = pyqtSignal(str, str)
-    incoming_p2p_call = pyqtSignal(str, dict)
-    p2p_call_response = pyqtSignal(str, dict)
+    message_received = pyqtSignal(dict)
+    incoming_p2p_call = pyqtSignal(str)
+    p2p_call_response = pyqtSignal(str, str)
     p2p_hang_up = pyqtSignal(str)
     hole_punch_successful = pyqtSignal(str, tuple) # username, public_address
+    message_deleted = pyqtSignal(str) # msg_id
+    message_edited = pyqtSignal(str, str) # msg_id, new_text
 
     def __init__(self, username, udp_socket, mode='internet'):
         super().__init__()
@@ -128,13 +130,23 @@ class P2PManager(QObject):
             if username:
                 self.peers[username] = {'local_ip': addr[0], 'public_addr': None, 'last_seen': time.time()}
         elif command == 'message':
-            text = payload.get('text')
-            if username and text:
-                self.message_received.emit(username, text)
+            # The payload is the entire message dictionary
+            if username and payload:
+                self.message_received.emit(payload)
+        elif command == 'delete_message':
+            msg_id = payload.get('id')
+            if msg_id:
+                self.message_deleted.emit(msg_id)
+        elif command == 'edit_message':
+            msg_id = payload.get('id')
+            new_text = payload.get('text')
+            if msg_id and new_text is not None:
+                self.message_edited.emit(msg_id, new_text)
         elif command == 'p2p_call_request':
-            self.incoming_p2p_call.emit(username, payload)
+            self.incoming_p2p_call.emit(username)
         elif command == 'p2p_call_response':
-            self.p2p_call_response.emit(username, payload)
+            response = payload.get('response')
+            self.p2p_call_response.emit(username, response)
         elif command == 'p2p_hang_up':
             self.p2p_hang_up.emit(username)
         elif command == 'hole_punch_syn':
@@ -156,17 +168,45 @@ class P2PManager(QObject):
                     del self.peers[username]
                     self.peer_lost.emit(username)
 
-    def broadcast_message(self, text):
+    def broadcast_message(self, message_dict):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        message_data = {'command': 'message', 'username': self.username, 'payload': {'text': text}}
+        # The message_dict is now the payload
+        message_data = {'command': 'message', 'username': self.username, 'payload': message_dict}
         message_bytes = json.dumps(message_data).encode('utf-8')
-        with threading.Lock():
-            for username, data in self.peers.items():
-                addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
-                try:
-                    sock.sendto(message_bytes, addr)
-                except Exception as e:
-                    print(f"Could not send message to {username}: {e}")
+        # No need for a lock if we're just iterating over a dictionary copy
+        for username, data in list(self.peers.items()):
+            addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
+            try:
+                sock.sendto(message_bytes, addr)
+            except Exception as e:
+                print(f"Could not send message to {username}: {e}")
+        sock.close()
+
+    def broadcast_delete_message(self, msg_id):
+        """Sends a command to all peers to delete a message."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        message_data = {'command': 'delete_message', 'username': self.username, 'payload': {'id': msg_id}}
+        message_bytes = json.dumps(message_data).encode('utf-8')
+        for username, data in list(self.peers.items()):
+            addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
+            try:
+                sock.sendto(message_bytes, addr)
+            except Exception as e:
+                print(f"Could not send delete command to {username}: {e}")
+        sock.close()
+
+    def broadcast_edit_message(self, msg_id, new_text):
+        """Sends a command to all peers to edit a message."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        payload = {'id': msg_id, 'text': new_text}
+        message_data = {'command': 'edit_message', 'username': self.username, 'payload': payload}
+        message_bytes = json.dumps(message_data).encode('utf-8')
+        for username, data in list(self.peers.items()):
+            addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
+            try:
+                sock.sendto(message_bytes, addr)
+            except Exception as e:
+                print(f"Could not send edit command to {username}: {e}")
         sock.close()
 
     def send_peer_command(self, target_username, command, payload, force_address=None):
