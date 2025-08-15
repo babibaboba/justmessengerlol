@@ -4,7 +4,7 @@ import time
 import json
 import asyncio
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QMetaObject, Qt, Q_ARG
-import pystun3 as stun
+import stun
 from kademlia.network import Server as KademliaServer
 
 P2P_PORT = 12346
