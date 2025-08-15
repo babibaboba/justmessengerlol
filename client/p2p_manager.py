@@ -16,7 +16,7 @@ class P2PManager(QObject):
     peer_discovered = pyqtSignal(str, str)
     peer_lost = pyqtSignal(str)
     message_received = pyqtSignal(dict)
-    incoming_p2p_call = pyqtSignal(str)
+    incoming_p2p_call = pyqtSignal(str, int) # username, sample_rate
     p2p_call_response = pyqtSignal(str, str)
     p2p_hang_up = pyqtSignal(str)
     hole_punch_successful = pyqtSignal(str, tuple) # username, public_address
@@ -143,7 +143,9 @@ class P2PManager(QObject):
             if msg_id and new_text is not None:
                 self.message_edited.emit(msg_id, new_text)
         elif command == 'p2p_call_request':
-            self.incoming_p2p_call.emit(username)
+            sample_rate = payload.get('sample_rate')
+            if sample_rate:
+                self.incoming_p2p_call.emit(username, sample_rate)
         elif command == 'p2p_call_response':
             response = payload.get('response')
             self.p2p_call_response.emit(username, response)
@@ -324,9 +326,9 @@ class P2PManager(QObject):
     def emit_peer_discovered(self, username, address):
         self.peer_discovered.emit(username, address)
 
-    def send_p2p_call_request(self, target_username):
-        """Отправляет запрос на звонок указанному пользователю."""
-        self.send_peer_command(target_username, 'p2p_call_request', {})
+    def send_p2p_call_request(self, target_username, sample_rate):
+        """Отправляет запрос на звонок указанному пользователю с указанием частоты дискретизации."""
+        self.send_peer_command(target_username, 'p2p_call_request', {'sample_rate': sample_rate})
 
     def send_p2p_call_response(self, target_username, response):
         """Отправляет ответ на запрос о звонке ('accept', 'reject', 'busy')."""

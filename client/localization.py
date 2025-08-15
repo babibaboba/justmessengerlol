@@ -71,6 +71,7 @@ translations = {
         'system_status_not_implemented': "System: Status change feature is not yet implemented.",
         'system_delete_not_implemented_server': "System: Deleting messages in 'server' mode is not yet implemented.",
         'system_edit_not_implemented_server': "System: Editing messages in 'server' mode is not yet implemented.",
+        'system_call_failed_rate_mismatch': "System: Call with {sender_username} failed. Your audio device does not support the requested sample rate ({requested_rate} Hz). Your device supports: {supported_rate} Hz.",
 
         # Errors
         'error_title': "Error",
@@ -79,6 +80,10 @@ translations = {
         'error_select_user_for_call': "Select a user to call.",
         'error_failed_to_determine_address': "Error: Failed to determine address for the call with {peer_username}.",
         'error_send_data_to_server': "Error sending data to server: {e}",
+        'error_no_supported_rate_input': "Your microphone does not support any of the standard sample rates. The call cannot be initiated.",
+        'error_checking_rate': "An error occurred while checking supported audio formats: {error}",
+        'error_no_negotiated_rate': "Error: Cannot start audio stream because a sample rate has not been negotiated.",
+        'error_starting_audio_stream': "Failed to start audio stream. Your audio device may be in use or improperly configured. Error: {error}",
     },
     'ru': {
         # Mode Selection
@@ -150,6 +155,7 @@ translations = {
         'system_status_not_implemented': "Система: Функция смены статуса еще не реализована.",
         'system_delete_not_implemented_server': "Система: Удаление сообщений в режиме 'сервер' еще не реализовано.",
         'system_edit_not_implemented_server': "Система: Редактирование сообщений в режиме 'сервер' еще не реализовано.",
+        'system_call_failed_rate_mismatch': "Система: Звонок с {sender_username} не удался. Ваше аудиоустройство не поддерживает запрашиваемую частоту дискретизации ({requested_rate} Гц). Ваше устройство поддерживает: {supported_rate} Гц.",
 
         # Errors
         'error_title': "Ошибка",
@@ -158,6 +164,10 @@ translations = {
         'error_select_user_for_call': "Выберите пользователя для звонка.",
         'error_failed_to_determine_address': "Ошибка: Не удалось определить адрес для звонка с {peer_username}.",
         'error_send_data_to_server': "Ошибка отправки данных на сервер: {e}",
+        'error_no_supported_rate_input': "Ваш микрофон не поддерживает ни одну из стандартных частот дискретизации. Невозможно совершить звонок.",
+        'error_checking_rate': "Произошла ошибка при проверке поддерживаемых аудиоформатов: {error}",
+        'error_no_negotiated_rate': "Ошибка: Невозможно запустить аудиопоток, так как не была согласована частота дискретизации.",
+        'error_starting_audio_stream': "Не удалось запустить аудиопоток. Ваше аудиоустройство может быть занято или некорректно настроено. Ошибка: {error}",
     }
 }
 

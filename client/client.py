@@ -8,7 +8,7 @@ import sounddevice as sd
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QLineEdit,
                              QPushButton, QVBoxLayout, QWidget, QMessageBox,
                              QDialog, QLabel, QFormLayout, QListWidget, QHBoxLayout, QSplitter,
-                             QInputDialog, QGridLayout, QComboBox, QMenu, QTabWidget, QScrollArea, QListWidgetItem)
+                             QInputDialog, QGridLayout, QComboBox, QMenu, QTabWidget, QScrollArea, QListWidgetItem, QFileDialog)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize, QMetaObject, pyqtSlot
 
 # Проверяем, существуют ли файлы, и импортируем их
@@ -390,7 +390,7 @@ class ServerNetworkThread(QThread):
 
 class AudioThread(QThread):
     """Поток для отправки и получения аудиоданных."""
-    def __init__(self, udp_socket, peer_addr, input_device_index=None, output_device_index=None):
+    def __init__(self, udp_socket, peer_addr, sample_rate, input_device_index=None, output_device_index=None):
         super().__init__()
         self.udp_socket = udp_socket
         self.peer_addr = peer_addr
@@ -399,13 +399,16 @@ class AudioThread(QThread):
         self.muted_addrs = set()
         self.audio = pyaudio.PyAudio()
         
+        # Используем согласованную частоту дискретизации
+        self.rate = sample_rate
+        
         self.output_stream = self.audio.open(format=FORMAT, channels=CHANNELS,
-                                             rate=RATE, output=True,
+                                             rate=self.rate, output=True,
                                              frames_per_buffer=CHUNK,
                                              output_device_index=output_device_index)
         
         self.input_stream = self.audio.open(format=FORMAT, channels=CHANNELS,
-                                            rate=RATE, input=True,
+                                            rate=self.rate, input=True,
                                             frames_per_buffer=CHUNK,
                                             input_device_index=input_device_index)
 
@@ -484,6 +487,7 @@ class ChatWindow(QMainWindow):
         self.call_window = None
         self.current_peer_addr = None
         self.pending_call_target = None # Хранит имя пользователя, которому мы пытаемся позвонить
+        self.negotiated_rate = None # Для хранения согласованной частоты дискретизации
         self.current_theme = 'light'
         self.muted_peers = set()
 
@@ -520,7 +524,12 @@ class ChatWindow(QMainWindow):
         self.send_button = QPushButton()
         self.send_button.clicked.connect(self.send_message)
         
+        self.attach_button = QPushButton("📎")
+        self.attach_button.setFixedSize(QSize(40, 28))
+        self.attach_button.clicked.connect(self.select_file_to_send)
+
         input_layout.addWidget(self.msg_entry)
+        input_layout.addWidget(self.attach_button)
         input_layout.addWidget(self.emoji_button)
         input_layout.addWidget(self.send_button)
 
@@ -615,12 +624,13 @@ class ChatWindow(QMainWindow):
         self.p2p_manager.peer_discovered.connect(self.add_peer)
         self.p2p_manager.peer_lost.connect(self.remove_peer)
         self.p2p_manager.message_received.connect(self.p2p_message_received)
-        self.p2p_manager.incoming_p2p_call.connect(self.handle_p2p_call_request)
+        self.p2p_manager.incoming_p2p_call.connect(self.handle_p2p_call_request) # будет (str, int)
         self.p2p_manager.p2p_call_response.connect(self.handle_p2p_call_response)
         self.p2p_manager.p2p_hang_up.connect(self.handle_p2p_hang_up)
         self.p2p_manager.hole_punch_successful.connect(self.on_hole_punch_success)
         self.p2p_manager.message_deleted.connect(self.delete_message_from_box)
         self.p2p_manager.message_edited.connect(self.edit_message_in_box)
+        # TODO: Добавить сигналы для передачи файлов
         self.p2p_manager.start()
 
         if p2p_mode == 'local':
@@ -739,6 +749,34 @@ class ChatWindow(QMainWindow):
             self.peer_search_input.clear()
 
     # --- Логика звонков ---
+    def get_supported_rate(self, device_index, is_input=True):
+        """Проверяет и возвращает поддерживаемую частоту дискретизации для устройства."""
+        p = pyaudio.PyAudio()
+        supported_rates = [48000, 44100, 32000, 22050, 16000, 8000]
+        try:
+            for rate in supported_rates:
+                try:
+                    kwargs = {
+                        'rate': rate,
+                        'channels': CHANNELS,
+                        'format': FORMAT
+                    }
+                    if is_input:
+                        kwargs['input_device_index'] = device_index
+                        is_supported = p.is_format_supported(rate, **kwargs)
+                    else:
+                        kwargs['output_device_index'] = device_index
+                        is_supported = p.is_format_supported(rate, **kwargs)
+
+                    if is_supported:
+                        print(f"Устройство (индекс {device_index}) поддерживает частоту {rate} Hz.")
+                        return rate
+                except ValueError:
+                    continue # PyAudio может выдать ошибку, если формат не поддерживается
+            return None
+        finally:
+            p.terminate()
+
     def initiate_call(self):
         if self.audio_thread:
             self.show_error(self.tr.get('error_already_in_call'))
@@ -750,36 +788,64 @@ class ChatWindow(QMainWindow):
             return
             
         target_username = selected_items[0].text().split(' ')[0] # Убираем [Muted]
-        self.pending_call_target = target_username
         
+        # 1. Определяем поддерживаемую частоту дискретизации
+        config = self.config_manager.load_config()
+        input_device_index = config.get('input_device_index')
+        
+        try:
+            supported_rate = self.get_supported_rate(input_device_index, is_input=True)
+            if not supported_rate:
+                self.show_error(self.tr.get('error_no_supported_rate_input'))
+                return
+            self.negotiated_rate = supported_rate
+        except Exception as e:
+            self.show_error(self.tr.get('error_checking_rate', error=e))
+            return
+
+        # 2. Продолжаем процесс звонка
+        self.pending_call_target = target_username
         self.add_message_to_box(self.tr.get('system_call_setup', target_username=target_username))
         self.p2p_manager.initiate_hole_punch(target_username)
 
     def on_hole_punch_success(self, username, public_address):
         """Вызывается, когда hole punching удался."""
-        # Эта функция вызывается и у звонящего, и у отвечающего.
-        # Нужно четко разделить их логику.
-
-        # Логика для инициатора звонка (того, кто нажал "Позвонить")
+        # Логика для инициатора звонка
         if self.pending_call_target == username:
             self.add_message_to_box(self.tr.get('system_hole_punch_success_caller', username=username, public_address=public_address))
             self.current_peer_addr = (public_address[0], public_address[1])
-            self.p2p_manager.send_p2p_call_request(username)
-            return # Важно завершить выполнение здесь, чтобы не перейти к логике отвечающего
+            # Отправляем запрос на звонок с согласованной частотой
+            self.p2p_manager.send_p2p_call_request(username, self.negotiated_rate)
+            return
 
-        # Логика для отвечающего на звонок (того, кто нажал "Да" в диалоге)
-        # Флаг self.current_peer_addr == True устанавливается в handle_p2p_call_request
+        # Логика для отвечающего на звонок
         if self.current_peer_addr is True:
              self.add_message_to_box(self.tr.get('system_hole_punch_success_callee', username=username))
-             # Теперь у нас есть реальный адрес, сохраняем его
              self.current_peer_addr = (public_address[0], public_address[1])
+             # Отправляем 'accept' и начинаем аудиопоток
              self.p2p_manager.send_p2p_call_response(username, 'accept')
+             self.start_audio_stream(username)
 
 
-    def handle_p2p_call_request(self, sender_username):
+    def handle_p2p_call_request(self, sender_username, sample_rate):
         if self.audio_thread:
             self.p2p_manager.send_p2p_call_response(sender_username, 'busy')
             return
+
+        # Проверяем, поддерживает ли наше устройство вывода предложенную частоту
+        config = self.config_manager.load_config()
+        output_device_index = config.get('output_device_index')
+        supported_rate = self.get_supported_rate(output_device_index, is_input=False)
+
+        if supported_rate != sample_rate:
+             self.add_message_to_box(self.tr.get('system_call_failed_rate_mismatch',
+                                                 sender_username=sender_username,
+                                                 requested_rate=sample_rate,
+                                                 supported_rate=supported_rate or 'N/A'))
+             self.p2p_manager.send_p2p_call_response(sender_username, 'reject')
+             return
+
+        self.negotiated_rate = sample_rate # Сохраняем согласованную частоту
 
         reply = QMessageBox.question(self, self.tr.get('system_incoming_call_prompt_title'),
                                      self.tr.get('system_incoming_call_prompt_text', sender_username=sender_username),
@@ -787,42 +853,61 @@ class ChatWindow(QMainWindow):
 
         if reply == QMessageBox.StandardButton.Yes:
             self.add_message_to_box(self.tr.get('system_call_accepted_callee', sender_username=sender_username))
-            # Сохраняем имя, чтобы после успешного hole punch отправить 'accept'
             self.current_peer_addr = True # Флаг, что мы в процессе ответа
             self.p2p_manager.initiate_hole_punch(sender_username)
         else:
             self.p2p_manager.send_p2p_call_response(sender_username, 'reject')
+            self.negotiated_rate = None
 
     def handle_p2p_call_response(self, sender_username, response):
         if response == 'accept':
             if self.pending_call_target == sender_username:
                 self.add_message_to_box(self.tr.get('system_call_accepted_caller', sender_username=sender_username))
+                # У звонящего поток запускается здесь, после подтверждения
                 self.start_audio_stream(sender_username)
         elif response == 'reject':
             self.add_message_to_box(self.tr.get('system_call_rejected', sender_username=sender_username))
             self.pending_call_target = None
             self.current_peer_addr = None
+            self.negotiated_rate = None
         elif response == 'busy':
             self.add_message_to_box(self.tr.get('system_peer_busy', sender_username=sender_username))
             self.pending_call_target = None
             self.current_peer_addr = None
+            self.negotiated_rate = None
 
     def start_audio_stream(self, peer_username):
         if not self.current_peer_addr or not isinstance(self.current_peer_addr, tuple):
              self.show_error(self.tr.get('error_failed_to_determine_address', peer_username=peer_username))
              self.pending_call_target = None
              return
+        
+        if not self.negotiated_rate:
+            self.show_error(self.tr.get('error_no_negotiated_rate'))
+            return
 
         config = self.config_manager.load_config()
         input_device_index = config.get('input_device_index')
         output_device_index = config.get('output_device_index')
 
-        self.audio_thread = AudioThread(
-            self.udp_socket,
-            self.current_peer_addr,
-            input_device_index=input_device_index,
-            output_device_index=output_device_index
-        )
+        try:
+            self.audio_thread = AudioThread(
+                self.udp_socket,
+                self.current_peer_addr,
+                sample_rate=self.negotiated_rate,
+                input_device_index=input_device_index,
+                output_device_index=output_device_index
+            )
+        except Exception as e:
+            self.show_error(self.tr.get('error_starting_audio_stream', error=e))
+            self.audio_thread = None
+            # Попытаемся уведомить другую сторону, если это возможно
+            if self.current_peer_addr:
+                peer_name = self.p2p_manager.get_peer_username_by_addr(self.current_peer_addr) or peer_username
+                self.p2p_manager.send_p2p_hang_up(peer_name)
+            self.hang_up_call() # Сбрасываем состояние
+            return
+
         self.audio_thread.start()
         
         self.call_window = CallWindow(peer_username, self.tr, self)
@@ -848,6 +933,7 @@ class ChatWindow(QMainWindow):
             self.call_window = None
             
         self.current_peer_addr = None
+        self.negotiated_rate = None
 
     def handle_p2p_hang_up(self, sender_username):
         self.add_message_to_box(self.tr.get('system_peer_ended_call', sender_username=sender_username))
@@ -858,6 +944,29 @@ class ChatWindow(QMainWindow):
             self.call_window.close()
             self.call_window = None
         self.current_peer_addr = None
+        self.negotiated_rate = None
+
+    def select_file_to_send(self):
+        """Открывает диалог выбора файла для отправки."""
+        # В P2P режиме файл можно отправить только конкретному пользователю
+        if self.mode.startswith('p2p'):
+            selected_items = self.users_list.selectedItems()
+            if not selected_items:
+                self.show_error(self.tr.get('error_select_user_for_file_send', default="Please select a user to send the file to."))
+                return
+            target_username = selected_items[0].text().split(' ')[0]
+        else:
+            # В режиме сервера, возможно, другая логика (например, отправка всем или выбор из списка)
+            self.show_error("File sending is not yet supported in 'client-server' mode.")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(self, self.tr.get('select_file_dialog_title', default="Select File to Send"))
+        
+        if file_path:
+            # Пока что просто выводим сообщение, логика отправки будет добавлена позже
+            self.add_message_to_box(f"Preparing to send file: {file_path} to {target_username}")
+            # TODO: self.p2p_manager.initiate_file_transfer(target_username, file_path)
+            print(f"File selected: {file_path} for {target_username}")
 
     # --- Вспомогательные функции ---
     def add_message_to_box(self, message_data):
