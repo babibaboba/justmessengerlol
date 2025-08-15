@@ -3,8 +3,8 @@ import threading
 import time
 import json
 import asyncio
-from PyQt6.QtCore import QObject, pyqtSignal, QMetaObject, Qt, Q_ARG
-import stun
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QMetaObject, Qt, Q_ARG
+import pystun3 as stun
 from kademlia.network import Server as KademliaServer
 
 P2P_PORT = 12346
@@ -21,9 +21,10 @@ class P2PManager(QObject):
     p2p_hang_up = pyqtSignal(str)
     hole_punch_successful = pyqtSignal(str, tuple) # username, public_address
 
-    def __init__(self, username, mode='internet'):
+    def __init__(self, username, udp_socket, mode='internet'):
         super().__init__()
         self.username = username
+        self.udp_socket = udp_socket
         self.mode = mode
         self.peers = {} # {username: {'local_ip': str, 'public_addr': (ip, port), 'last_seen': float}}
         self.running = True
@@ -238,7 +239,7 @@ class P2PManager(QObject):
         else:
             print(f"[DHT] User {username} not found.")
 
-    def initiate_hole_punch(self, target_username, udp_socket):
+    def initiate_hole_punch(self, target_username):
         """Начинает процесс UDP hole punching."""
         if target_username not in self.peers:
             print(f"Cannot hole punch: {target_username} not found in peers.")
@@ -261,8 +262,8 @@ class P2PManager(QObject):
                 print(f"Sending SYN to {target_username} at {public_addr} (attempt {i+1})")
                 syn_packet = json.dumps({'command': 'hole_punch_syn', 'username': self.username}).encode('utf-8')
                 try:
-                    udp_socket.sendto(syn_packet, public_addr)
-                    udp_socket.sendto(syn_packet, local_addr) # И на локальный на всякий случай
+                    self.udp_socket.sendto(syn_packet, public_addr)
+                    self.udp_socket.sendto(syn_packet, local_addr) # И на локальный на всякий случай
                 except Exception as e:
                     print(f"Error sending SYN: {e}")
                 time.sleep(0.5)
