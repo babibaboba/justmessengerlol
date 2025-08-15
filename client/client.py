@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QLineEdit,
                              QPushButton, QVBoxLayout, QWidget, QMessageBox,
                              QDialog, QLabel, QFormLayout, QListWidget, QHBoxLayout, QSplitter,
                              QInputDialog, QGridLayout, QComboBox, QMenu, QTabWidget, QScrollArea)
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize, QMetaObject
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSize, QMetaObject, pyqtSlot
 
 # Проверяем, существуют ли файлы, и импортируем их
 try:
