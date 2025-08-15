@@ -6,6 +6,7 @@ import json
 import uuid
 import pyaudio
 import sounddevice as sd
+from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QLineEdit,
                              QPushButton, QVBoxLayout, QWidget, QMessageBox,
                              QDialog, QLabel, QFormLayout, QListWidget, QHBoxLayout, QSplitter,
@@ -781,7 +782,8 @@ class ChatWindow(QMainWindow):
         message_data = {
             'id': msg_id,
             'sender': self.username,
-            'text': text
+            'text': text,
+            'timestamp': datetime.now().isoformat()
         }
 
         if self.mode.startswith('p2p'):
@@ -1147,7 +1149,21 @@ class ChatWindow(QMainWindow):
             # TODO: Maybe set a different color for system messages
         elif isinstance(message_data, dict):
             sender = "Вы" if message_data.get('sender') == self.username else message_data.get('sender', 'Неизвестно')
-            display_text = f"{sender}: {message_data.get('text', '')}"
+            text = message_data.get('text', '')
+            timestamp_str = message_data.get('timestamp')
+            
+            if timestamp_str:
+                try:
+                    # Parse ISO format and convert to a more readable HH:MM:SS format
+                    dt_obj = datetime.fromisoformat(timestamp_str)
+                    time_str = dt_obj.strftime("%H:%M:%S")
+                    display_text = f"[{time_str}] {sender}: {text}"
+                except (ValueError, TypeError):
+                    # Fallback if timestamp is invalid
+                    display_text = f"{sender}: {text}"
+            else:
+                display_text = f"{sender}: {text}"
+
             item = QListWidgetItem(display_text)
             # Store the whole message data object in the item
             item.setData(Qt.ItemDataRole.UserRole, message_data)
