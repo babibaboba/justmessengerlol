@@ -421,12 +421,10 @@ class ChatWindow(QMainWindow):
             self.plugin_manager.trigger_hook('on_server_broadcast', text=text)
             self.add_message_to_box(f"СЕРВЕР: {text}")
 
-    def p2p_message_received(self, data):
-        msg_type = data.get('type')
-        sender = data.get('sender')
-        
-        if msg_type == 'text_message':
-            self.add_message_to_box(f"{sender}: {data.get('text')}")
+    def p2p_message_received(self, sender, text):
+        # This slot receives sender (str) and text (str) from the p2p_manager signal
+        if sender != self.username:
+            self.add_message_to_box(f"{sender}: {text}")
 
     def add_peer(self, username, address_info):
         if username == self.username: return

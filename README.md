@@ -1,91 +1,97 @@
 # JustMessenger
 
-JustMessenger - это гибридный мессенджер, поддерживающий как централизованную клиент-серверную архитектуру, так и децентрализованную P2P-связь. Приложение предоставляет функционал текстового чата и голосовых звонков.
+JustMessenger is a hybrid messenger that supports both a centralized client-server architecture and decentralized P2P communication. The application provides text chat and voice call functionality.
 
-## Основные функции
+## Core Features
 
--   **Гибридная архитектура**:
-    -   **Клиент-Сервер**: Классический режим, где все сообщения проходят через центральный сервер.
-    -   **P2P (Интернет)**: Децентрализованный режим, использующий DHT (Kademlia) для обнаружения пользователей и STUN для обхода NAT, позволяя пользователям общаться напрямую.
-    -   **P2P (Локальная сеть)**: Режим для общения в пределах одной локальной сети без необходимости подключения к интернету.
--   **Текстовый чат**: Обмен сообщениями в реальном времени.
--   **Голосовые звонки**: P2P-звонки с использованием PyAudio и UDP Hole Punching для прямого соединения.
--   **Обнаружение пользователей**: В режиме P2P (Интернет) используется DHT на базе Kademlia для поиска и подключения к другим пользователям.
--   **Плагины**: Поддержка плагинов для расширения функциональности.
--   **Кастомизация**: Возможность переключения между светлой и темной темами оформления.
+-   **Hybrid Architecture**:
+    -   **Client-Server**: A classic mode where all messages are routed through a central server.
+    -   **P2P (Internet)**: A decentralized mode that uses a DHT (Kademlia) for peer discovery and STUN for NAT traversal, allowing users to communicate directly.
+    -   **P2P (Local Network)**: A mode for communication within a single local network without needing an internet connection.
+-   **Text Chat**: Real-time text messaging.
+-   **Voice Calls**: P2P calls using PyAudio and UDP Hole Punching for a direct connection.
+-   **Peer Discovery**: In P2P (Internet) mode, a Kademlia-based DHT is used to find and connect to other users.
+-   **Plugins**: Support for plugins to extend functionality.
+-   **Customization**: Ability to switch between light and dark UI themes.
 
-## Технологии
+## Technologies
 
--   **Язык**: Python 3
+-   **Language**: Python 3
 -   **GUI**: PyQt6
--   **Аудио**: PyAudio
--   **P2P Сеть**:
+-   **Audio**: PyAudio
+-   **P2P Network**:
     -   **DHT**: `kademlia`
     -   **NAT Traversal**: `pystun3`
 
-## Установка
+## Installation
 
-1.  **Клонируйте репозиторий:**
+Follow these steps to set up the project:
+
+1.  **Clone the repository and navigate into the directory:**
     ```bash
-    git clone <URL репозитория>
-    cd <папка проекта>
+    git clone <repository_url>
+    cd <project_folder>
     ```
 
-2.  **Создайте и активируйте виртуальное окружение:**
+2.  **Create a virtual environment:**
+    *This will create a `venv` folder in the project root to store dependencies.*
     ```bash
-    # Для Windows
     python -m venv venv
+    ```
+
+3.  **Activate the virtual environment:**
+    ```bash
+    # Windows (Command Prompt or PowerShell)
     .\venv\Scripts\activate
 
-    # Для macOS/Linux
-    python3 -m venv venv
+    # macOS / Linux (Bash)
     source venv/bin/activate
     ```
+    *After activation, you will see `(venv)` at the beginning of your terminal prompt.*
 
-3.  **Установите зависимости:**
+4.  **Install the required libraries:**
     ```bash
     pip install -r VoiceChat/requirements.txt
     ```
-    *Примечание: Для установки `PyAudio` на некоторых системах могут потребоваться дополнительные зависимости. См. [документацию PortAudio](http://www.portaudio.com/docs/v19-doxydocs/tutorial_start.html).*
+    *Note: Installing `PyAudio` may require additional system dependencies. Please refer to the [PortAudio documentation](http://www.portaudio.com/docs/v19-doxydocs/tutorial_start.html) for details.*
 
-## Запуск
+## Usage
 
-### 1. Сервер (для клиент-серверного режима)
+### 1. Server (for Client-Server mode)
 
-Для работы в режиме "Клиент-Сервер" необходимо сначала запустить сервер.
+To use the "Client-Server" mode, you must first run the server.
 ```bash
 python VoiceChat/server/server.py
 ```
-Сервер запустится на `127.0.0.1:12345`.
+The server will start on `127.0.0.1:12345`.
 
-### 2. Клиент
+### 2. Client
 
-Запустите клиентский скрипт:
+Run the client script:
 ```bash
 python VoiceChat/client/client.py
 ```
-При запуске появится диалоговое окно, в котором нужно выбрать один из трех режимов работы:
--   `Клиент-Сервер`
--   `P2P (Интернет)`
--   `P2P (Локальная сеть)`
+Upon launch, a dialog box will appear, prompting you to choose one of three operating modes:
+-   `Client-Server`
+-   `P2P (Internet)`
+-   `P2P (Local Network)`
 
-После выбора режима и ввода имени пользователя откроется главное окно чата.
+After selecting a mode and entering a username, the main chat window will open.
 
-## Структура проекта
+## Project Structure
 
 ```
 .
 ├── VoiceChat/
-│   ├── client/         # Исходный код клиента
+│   ├── client/         # Client source code
 │   │   ├── client.py
 │   │   ├── p2p_manager.py
-│   │   ├── config_manager.py
 │   │   └── ...
-│   ├── server/         # Исходный код сервера
+│   ├── server/         # Server source code
 │   │   ├── server.py
 │   │   └── ...
-│   ├── plugins/        # Папка для плагинов
+│   ├── plugins/        # Directory for plugins
 │   │   └── example_plugin/
-│   ├── README.md       # Этот файл
-│   └── requirements.txt # Список зависимостей
+│   ├── README.md       # This file
+│   └── requirements.txt # Project dependencies
 └── ...

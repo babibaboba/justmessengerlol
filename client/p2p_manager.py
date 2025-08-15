@@ -200,9 +200,17 @@ class P2PManager(QObject):
         # Сначала получаем наш публичный адрес
         await self.dht_loop.run_in_executor(None, self._get_public_address)
         
-        bootstrap_nodes = [("router.bittorrent.com", 6881), ("dht.transmissionbt.com", 6881)]
+        bootstrap_nodes = [
+            ("router.utorrent.com", 6881),
+            ("router.bittorrent.com", 6881),
+            ("dht.transmissionbt.com", 6881),
+            ("dht.aelitis.com", 6881)
+        ]
         await self.dht_node.listen(P2P_PORT)
-        await self.dht_node.bootstrap(bootstrap_nodes)
+        
+        print("[DHT] Bootstrapping with nodes:", bootstrap_nodes)
+        found_neighbors = await self.dht_node.bootstrap(bootstrap_nodes)
+        print(f"[DHT] Bootstrap complete. Found {len(found_neighbors)} neighbors.")
 
         while self.running:
             my_address_info = json.dumps({
@@ -275,3 +283,23 @@ class P2PManager(QObject):
     @pyqtSlot(str, str)
     def emit_peer_discovered(self, username, address):
         self.peer_discovered.emit(username, address)
+
+    def send_p2p_call_request(self, target_username):
+        """Отправляет запрос на звонок указанному пользователю."""
+        self.send_peer_command(target_username, 'p2p_call_request', {})
+
+    def send_p2p_call_response(self, target_username, response):
+        """Отправляет ответ на запрос о звонке ('accept', 'reject', 'busy')."""
+        self.send_peer_command(target_username, 'p2p_call_response', {'response': response})
+
+    def send_p2p_hang_up(self, target_username):
+        """Сообщает другому пиру о завершении звонка."""
+        self.send_peer_command(target_username, 'p2p_hang_up', {})
+
+    def get_peer_username_by_addr(self, address):
+        """Находит имя пользователя по его адресу."""
+        for uname, data in self.peers.items():
+            peer_addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
+            if peer_addr == address:
+                return uname
+        return None
