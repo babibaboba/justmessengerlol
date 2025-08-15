@@ -29,8 +29,8 @@ Follow these steps to set up the project:
 
 1.  **Clone the repository and navigate into the directory:**
     ```bash
-    git clone <repository_url>
-    cd <project_folder>
+    git clone https://github.com/babibaboba/justmessengerlol/
+    cd justmessengerlol
     ```
 
 2.  **Create a virtual environment:**
