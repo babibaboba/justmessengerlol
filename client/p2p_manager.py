@@ -22,6 +22,10 @@ class P2PManager(QObject):
     hole_punch_successful = pyqtSignal(str, tuple) # username, public_address
     message_deleted = pyqtSignal(str) # msg_id
     message_edited = pyqtSignal(str, str) # msg_id, new_text
+    
+    # Сигналы для передачи файлов
+    incoming_file_request = pyqtSignal(str, str, int, str, int) # username, filename, filesize, ip, port
+    file_request_response = pyqtSignal(str, bool) # username, accepted
 
     def __init__(self, username, udp_socket, mode='internet'):
         super().__init__()
@@ -159,6 +163,18 @@ class P2PManager(QObject):
             # Получили ACK, соединение установлено!
             print(f"Received hole punch ACK from {username} at {addr}. Hole punch successful!")
             self.hole_punch_successful.emit(username, addr)
+        elif command == 'file_transfer_request':
+            filename = payload.get('filename')
+            filesize = payload.get('filesize')
+            port = payload.get('port')
+            # IP-адрес берем из самого пакета
+            ip = addr[0]
+            if filename and filesize and ip and port:
+                self.incoming_file_request.emit(username, filename, filesize, ip, port)
+        elif command == 'file_transfer_response':
+            accepted = payload.get('accepted')
+            if accepted is not None:
+                self.file_request_response.emit(username, accepted)
 
     def check_peers(self):
         while self.running:
@@ -337,6 +353,19 @@ class P2PManager(QObject):
     def send_p2p_hang_up(self, target_username):
         """Сообщает другому пиру о завершении звонка."""
         self.send_peer_command(target_username, 'p2p_hang_up', {})
+
+    def send_file_transfer_request(self, target_username, filename, filesize, port):
+        """Отправляет запрос на передачу файла."""
+        payload = {
+            'filename': filename,
+            'filesize': filesize,
+            'port': port
+        }
+        self.send_peer_command(target_username, 'file_transfer_request', payload)
+
+    def send_file_transfer_response(self, target_username, accepted):
+        """Отправляет ответ на запрос о передаче файла."""
+        self.send_peer_command(target_username, 'file_transfer_response', {'accepted': accepted})
 
     def get_peer_username_by_addr(self, address):
         """Находит имя пользователя по его адресу."""

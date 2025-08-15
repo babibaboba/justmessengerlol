@@ -48,7 +48,16 @@ translations = {
         'edit_dialog_title': "Edit Message",
         'edit_dialog_label': "New text:",
 
+        # File Transfer
+        'select_file_dialog_title': "Select File to Send",
+        'save_file_dialog_title': "Save File",
+        'file_transfer_request_title': "File Transfer Request",
+        'file_transfer_request_text': "{username} wants to send you the file '{filename}' ({size} KB). Accept?",
+
         # System Messages
+        'system_file_request_sent': "System: Sent a request to {username} to send the file '{filename}'.",
+        'system_file_transfer_accepted': "System: {username} has accepted the file transfer.",
+        'system_file_transfer_rejected': "System: {username} has rejected the file transfer.",
         'system_p2p_local_start': "System: You are in P2P (Local Network) mode. Searching for other users...",
         'system_p2p_internet_start': "System: You are in P2P (Internet) mode. Use search to find users.",
         'system_searching_for_peer': "System: Searching for {peer_name} in DHT...",
@@ -84,6 +93,7 @@ translations = {
         'error_checking_rate': "An error occurred while checking supported audio formats: {error}",
         'error_no_negotiated_rate': "Error: Cannot start audio stream because a sample rate has not been negotiated.",
         'error_starting_audio_stream': "Failed to start audio stream. Your audio device may be in use or improperly configured. Error: {error}",
+        'error_select_user_for_file_send': "Please select a user to send the file to.",
     },
     'ru': {
         # Mode Selection
@@ -132,7 +142,16 @@ translations = {
         'edit_dialog_title': "Редактировать сообщение",
         'edit_dialog_label': "Новый текст:",
 
+        # File Transfer
+        'select_file_dialog_title': "Выберите файл для отправки",
+        'save_file_dialog_title': "Сохранить файл",
+        'file_transfer_request_title': "Запрос на передачу файла",
+        'file_transfer_request_text': "{username} хочет отправить вам файл '{filename}' ({size} КБ). Принять?",
+
         # System Messages
+        'system_file_request_sent': "Система: Отправлен запрос пользователю {username} на передачу файла '{filename}'.",
+        'system_file_transfer_accepted': "Система: {username} принял запрос на передачу файла.",
+        'system_file_transfer_rejected': "Система: {username} отклонил запрос на передачу файла.",
         'system_p2p_local_start': "Система: Вы в режиме P2P (Локальная сеть). Идет поиск других пользователей...",
         'system_p2p_internet_start': "Система: Вы в режиме P2P (Интернет). Используйте поиск, чтобы найти пользователей.",
         'system_searching_for_peer': "Система: Ищем {peer_name} в DHT...",
@@ -168,6 +187,7 @@ translations = {
         'error_checking_rate': "Произошла ошибка при проверке поддерживаемых аудиоформатов: {error}",
         'error_no_negotiated_rate': "Ошибка: Невозможно запустить аудиопоток, так как не была согласована частота дискретизации.",
         'error_starting_audio_stream': "Не удалось запустить аудиопоток. Ваше аудиоустройство может быть занято или некорректно настроено. Ошибка: {error}",
+        'error_select_user_for_file_send': "Пожалуйста, выберите пользователя, которому хотите отправить файл.",
     }
 }
 

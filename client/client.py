@@ -1,4 +1,5 @@
 import sys
+import os
 import socket
 import threading
 import json
@@ -386,6 +387,99 @@ class ServerNetworkThread(QThread):
             pass
         self.sock.close()
 
+# --- Потоки для передачи файлов ---
+
+class FileSenderThread(QThread):
+    """Поток для отправки файла. Он слушает на сокете и ждет подключения."""
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, filepath, server_socket, parent=None):
+        super().__init__(parent)
+        self.filepath = filepath
+        self.server_socket = server_socket
+        self.running = True
+
+    def run(self):
+        try:
+            # Ждем подключения от получателя
+            self.server_socket.settimeout(30) # 30 секунд на подключение
+            conn, addr = self.server_socket.accept()
+            
+            filesize = os.path.getsize(self.filepath)
+            with open(self.filepath, 'rb') as f:
+                sent_bytes = 0
+                while self.running:
+                    chunk = f.read(4096)
+                    if not chunk:
+                        break
+                    conn.sendall(chunk)
+                    sent_bytes += len(chunk)
+                    self.progress.emit(int((sent_bytes / filesize) * 100))
+            
+            if self.running:
+                self.finished.emit(f"File '{os.path.basename(self.filepath)}' sent successfully.")
+        except socket.timeout:
+            self.error.emit("File transfer failed: Receiver did not connect in time.")
+        except Exception as e:
+            self.error.emit(f"Error sending file: {e}")
+        finally:
+            if 'conn' in locals():
+                conn.close()
+            self.server_socket.close()
+
+    def stop(self):
+        self.running = False
+        # Закрытие сокета прервет accept()
+        try:
+            self.server_socket.close()
+        except:
+            pass
+
+class FileReceiverThread(QThread):
+    """Поток для приема файла. Он подключается к отправителю."""
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(str, str) # filename, final_path
+    error = pyqtSignal(str)
+
+    def __init__(self, target_ip, target_port, filename, filesize, save_path, parent=None):
+        super().__init__(parent)
+        self.target_ip = target_ip
+        self.target_port = target_port
+        self.filename = filename
+        self.filesize = filesize
+        self.save_path = save_path
+        self.running = True
+
+    def run(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((self.target_ip, self.target_port))
+
+            with open(self.save_path, 'wb') as f:
+                received_bytes = 0
+                while self.running and received_bytes < self.filesize:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        # Если соединение закрыто раньше времени
+                        if received_bytes < self.filesize:
+                            raise ConnectionAbortedError("Sender closed connection prematurely.")
+                        break
+                    f.write(chunk)
+                    received_bytes += len(chunk)
+                    self.progress.emit(int((received_bytes / self.filesize) * 100))
+            
+            if self.running:
+                self.finished.emit(self.filename, self.save_path)
+        except Exception as e:
+            self.error.emit(f"Error receiving file: {e}")
+        finally:
+            sock.close()
+
+    def stop(self):
+        self.running = False
+
 # --- Поток для аудио ---
 
 class AudioThread(QThread):
@@ -490,6 +584,7 @@ class ChatWindow(QMainWindow):
         self.negotiated_rate = None # Для хранения согласованной частоты дискретизации
         self.current_theme = 'light'
         self.muted_peers = set()
+        self.file_transfer_threads = {} # Для отслеживания потоков передачи файлов
 
         self.setup_ui()
         self.apply_theme()
@@ -630,7 +725,8 @@ class ChatWindow(QMainWindow):
         self.p2p_manager.hole_punch_successful.connect(self.on_hole_punch_success)
         self.p2p_manager.message_deleted.connect(self.delete_message_from_box)
         self.p2p_manager.message_edited.connect(self.edit_message_in_box)
-        # TODO: Добавить сигналы для передачи файлов
+        self.p2p_manager.incoming_file_request.connect(self.handle_incoming_file_request)
+        self.p2p_manager.file_request_response.connect(self.handle_file_request_response)
         self.p2p_manager.start()
 
         if p2p_mode == 'local':
@@ -756,17 +852,16 @@ class ChatWindow(QMainWindow):
         try:
             for rate in supported_rates:
                 try:
-                    kwargs = {
-                        'rate': rate,
-                        'channels': CHANNELS,
-                        'format': FORMAT
-                    }
                     if is_input:
-                        kwargs['input_device_index'] = device_index
-                        is_supported = p.is_format_supported(rate, **kwargs)
+                        is_supported = p.is_format_supported(rate,
+                                                             input_device=device_index,
+                                                             input_channels=CHANNELS,
+                                                             input_format=FORMAT)
                     else:
-                        kwargs['output_device_index'] = device_index
-                        is_supported = p.is_format_supported(rate, **kwargs)
+                        is_supported = p.is_format_supported(rate,
+                                                             output_device=device_index,
+                                                             output_channels=CHANNELS,
+                                                             output_format=FORMAT)
 
                     if is_supported:
                         print(f"Устройство (индекс {device_index}) поддерживает частоту {rate} Hz.")
@@ -946,8 +1041,9 @@ class ChatWindow(QMainWindow):
         self.current_peer_addr = None
         self.negotiated_rate = None
 
+    # --- Логика передачи файлов ---
     def select_file_to_send(self):
-        """Открывает диалог выбора файла для отправки."""
+        """Открывает диалог выбора файла и инициирует передачу."""
         # В P2P режиме файл можно отправить только конкретному пользователю
         if self.mode.startswith('p2p'):
             selected_items = self.users_list.selectedItems()
@@ -963,10 +1059,84 @@ class ChatWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, self.tr.get('select_file_dialog_title', default="Select File to Send"))
         
         if file_path:
-            # Пока что просто выводим сообщение, логика отправки будет добавлена позже
-            self.add_message_to_box(f"Preparing to send file: {file_path} to {target_username}")
-            # TODO: self.p2p_manager.initiate_file_transfer(target_username, file_path)
-            print(f"File selected: {file_path} for {target_username}")
+           try:
+               filesize = os.path.getsize(file_path)
+               filename = os.path.basename(file_path)
+
+               # 1. Создаем TCP-сервер для прослушивания, к которому подключится получатель
+               server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+               server_sock.bind(('', 0)) # Пустой IP для прослушивания на всех интерфейсах, 0 для случайного порта
+               server_sock.listen(1)
+               listen_port = server_sock.getsockname()[1]
+
+               # 2. Отправляем P2P-запрос на передачу файла с портом для подключения
+               self.p2p_manager.send_file_transfer_request(target_username, filename, filesize, listen_port)
+               self.add_message_to_box(self.tr.get('system_file_request_sent', filename=filename, username=target_username))
+               
+               # 3. Запускаем поток-отправитель, который будет ждать подключения и отправлять файл
+               sender_thread = FileSenderThread(file_path, server_sock)
+               sender_thread.finished.connect(lambda msg: self.add_message_to_box(f"System: {msg}"))
+               sender_thread.error.connect(self.show_error)
+               sender_thread.start()
+
+               # Сохраняем поток, чтобы мы могли его остановить, если что-то пойдет не так
+               transfer_id = f"send_{target_username}_{filename}"
+               self.file_transfer_threads[transfer_id] = sender_thread
+
+           except Exception as e:
+               self.show_error(f"Error preparing file transfer: {e}")
+
+    def handle_incoming_file_request(self, sender_username, filename, filesize, ip, port):
+       """Обрабатывает входящий запрос на передачу файла."""
+       reply = QMessageBox.question(self,
+                                    self.tr.get('file_transfer_request_title'),
+                                    self.tr.get('file_transfer_request_text',
+                                                username=sender_username,
+                                                filename=filename,
+                                                size=round(filesize / 1024, 2)), # в КБ
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+       if reply == QMessageBox.StandardButton.Yes:
+           save_path, _ = QFileDialog.getSaveFileName(self, self.tr.get('save_file_dialog_title'), filename)
+           
+           if save_path:
+               self.p2p_manager.send_file_transfer_response(sender_username, accepted=True)
+               
+               # Запускаем поток-получатель для подключения к отправителю и скачивания файла
+               receiver_thread = FileReceiverThread(ip, port, filename, filesize, save_path)
+               receiver_thread.finished.connect(lambda f, p: self.add_message_to_box(f"File '{f}' received and saved to '{p}'"))
+               receiver_thread.error.connect(self.show_error)
+               receiver_thread.start()
+               
+               transfer_id = f"recv_{sender_username}_{filename}"
+               self.file_transfer_threads[transfer_id] = receiver_thread
+           else:
+               # Пользователь отменил сохранение
+               self.p2p_manager.send_file_transfer_response(sender_username, accepted=False)
+       else:
+           self.p2p_manager.send_file_transfer_response(sender_username, accepted=False)
+
+    def handle_file_request_response(self, target_username, accepted):
+       """Обрабатывает ответ на запрос о передаче файла."""
+       if accepted:
+           self.add_message_to_box(self.tr.get('system_file_transfer_accepted', username=target_username))
+           # Поток-отправитель уже запущен и слушает. Ничего больше делать не нужно.
+       else:
+           self.add_message_to_box(self.tr.get('system_file_transfer_rejected', username=target_username))
+           # Нужно остановить и удалить поток-отправитель
+           thread_to_stop = None
+           key_to_del = None
+           # Ищем поток, связанный с этим пользователем.
+           # Примечание: это не будет работать с несколькими одновременными передачами одному и тому же пользователю.
+           for key, thread in self.file_transfer_threads.items():
+               if key.startswith(f"send_{target_username}_"):
+                   thread_to_stop = thread
+                   key_to_del = key
+                   break
+           if thread_to_stop:
+               thread_to_stop.stop()
+               if key_to_del:
+                   del self.file_transfer_threads[key_to_del]
 
     # --- Вспомогательные функции ---
     def add_message_to_box(self, message_data):
