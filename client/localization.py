@@ -8,6 +8,7 @@ translations = {
         'mode_client_server': "Client-Server",
         'mode_p2p_internet': "P2P (Internet)",
         'mode_p2p_local': "P2P (Local Network)",
+        'mode_p2p_bluetooth': "P2P (Bluetooth)",
 
         # Username Input
         'username_dialog_title': "Username",
@@ -94,6 +95,32 @@ translations = {
         'error_no_negotiated_rate': "Error: Cannot start audio stream because a sample rate has not been negotiated.",
         'error_starting_audio_stream': "Failed to start audio stream. Your audio device may be in use or improperly configured. Error: {error}",
         'error_select_user_for_file_send': "Please select a user to send the file to.",
+
+        # Bluetooth
+        'scan_bt_button': "Scan BT",
+        'bt_devices_popup_title': "Bluetooth Devices",
+        'bt_no_devices_found': "No devices found.",
+        'bt_scanning': "Scanning for Bluetooth devices...",
+        'bt_connecting_to': "Connecting to Bluetooth device {address}...",
+        'bt_connected_to': "System: Connected to Bluetooth device {address}.",
+        'bt_connection_failed': "System: Failed to connect to Bluetooth device {address}.",
+        'bt_disconnected': "System: Disconnected from Bluetooth device.",
+        'bt_not_connected': "System: Not connected to any device.",
+        'bt_mode_start': "Bluetooth mode started. Use the Scan button to find devices.",
+        
+        # Hotkey Settings
+        'hotkey_settings_title': "Settings",
+        'hotkey_mute_label': "Mute Hotkey:",
+        'hotkey_record_button': "Record New Hotkey",
+        'hotkey_stop_record_button': "Stop Recording",
+        'hotkey_recording_prompt': "Press any key combination...",
+        'system_hotkey_set': "System: Mute hotkey set to '{hotkey}'.",
+        'system_audio_muted': "System: Audio Muted.",
+        'system_audio_unmuted': "System: Audio Unmuted.",
+
+        # Audio Messages
+        'system_recording_started': "Recording audio...",
+        'system_recording_finished': "Recording finished. Sending...",
     },
     'ru': {
         # Mode Selection
@@ -102,6 +129,7 @@ translations = {
         'mode_client_server': "Клиент-Сервер",
         'mode_p2p_internet': "P2P (Интернет)",
         'mode_p2p_local': "P2P (Локальная сеть)",
+        'mode_p2p_bluetooth': "P2P (Bluetooth)",
 
         # Username Input
         'username_dialog_title': "Имя пользователя",
@@ -188,6 +216,32 @@ translations = {
         'error_no_negotiated_rate': "Ошибка: Невозможно запустить аудиопоток, так как не была согласована частота дискретизации.",
         'error_starting_audio_stream': "Не удалось запустить аудиопоток. Ваше аудиоустройство может быть занято или некорректно настроено. Ошибка: {error}",
         'error_select_user_for_file_send': "Пожалуйста, выберите пользователя, которому хотите отправить файл.",
+
+        # Bluetooth
+        'scan_bt_button': "Сканировать BT",
+        'bt_devices_popup_title': "Bluetooth Устройства",
+        'bt_no_devices_found': "Устройства не найдены.",
+        'bt_scanning': "Поиск Bluetooth устройств...",
+        'bt_connecting_to': "Подключение к Bluetooth устройству {address}...",
+        'bt_connected_to': "Система: Подключено к Bluetooth устройству {address}.",
+        'bt_connection_failed': "Система: Не удалось подключиться к Bluetooth устройству {address}.",
+        'bt_disconnected': "Система: Отключено от Bluetooth устройства.",
+        'bt_not_connected': "Система: Нет подключения к какому-либо устройству.",
+        'bt_mode_start': "Режим Bluetooth запущен. Используйте кнопку 'Сканировать' для поиска устройств.",
+
+        # Hotkey Settings
+        'hotkey_settings_title': "Настройки",
+        'hotkey_mute_label': "Горячая клавиша выключения микрофона:",
+        'hotkey_record_button': "Записать новую клавишу",
+        'hotkey_stop_record_button': "Остановить запись",
+        'hotkey_recording_prompt': "Нажмите любую комбинацию клавиш...",
+        'system_hotkey_set': "Система: Горячая клавиша выключения микрофона установлена на '{hotkey}'.",
+        'system_audio_muted': "Система: Микрофон выключен.",
+        'system_audio_unmuted': "Система: Микрофон включен.",
+
+        # Audio Messages
+        'system_recording_started': "Идет запись аудио...",
+        'system_recording_finished': "Запись завершена. Отправка...",
     }
 }
 

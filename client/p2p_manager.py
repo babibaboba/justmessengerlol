@@ -3,41 +3,63 @@ import threading
 import time
 import json
 import asyncio
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QMetaObject, Qt, Q_ARG
 import stun
+import msgpack
+import zstandard as zstd
 from kademlia.network import Server as KademliaServer
+from encryption_manager import EncryptionManager
 
 P2P_PORT = 12346
 BROADCAST_ADDR = '<broadcast>'
 STUN_SERVER = "stun.l.google.com"
 STUN_PORT = 19302
 
-class P2PManager(QObject):
-    peer_discovered = pyqtSignal(str, str)
-    peer_lost = pyqtSignal(str)
-    message_received = pyqtSignal(dict)
-    incoming_p2p_call = pyqtSignal(str, int) # username, sample_rate
-    p2p_call_response = pyqtSignal(str, str)
-    p2p_hang_up = pyqtSignal(str)
-    hole_punch_successful = pyqtSignal(str, tuple) # username, public_address
-    message_deleted = pyqtSignal(str) # msg_id
-    message_edited = pyqtSignal(str, str) # msg_id, new_text
-    
-    # Сигналы для передачи файлов
-    incoming_file_request = pyqtSignal(str, str, int, str, int) # username, filename, filesize, ip, port
-    file_request_response = pyqtSignal(str, bool) # username, accepted
-
-    def __init__(self, username, udp_socket, mode='internet'):
-        super().__init__()
+class P2PManager:
+    def __init__(self, username, chat_history, mode='internet'):
         self.username = username
-        self.udp_socket = udp_socket
+        self.udp_socket = None
+        self.chat_history = chat_history
         self.mode = mode
         self.peers = {} # {username: {'local_ip': str, 'public_addr': (ip, port), 'last_seen': float}}
+        self.groups = {} # {group_id: {'name': str, 'members': {username}, 'admin': username}}
         self.running = True
         self.dht_node = None
         self.dht_thread = None
         self.dht_loop = None
         
+        self.encryption_manager = EncryptionManager()
+        self.zstd_c = zstd.ZstdCompressor()
+        self.zstd_d = zstd.ZstdDecompressor()
+        
+        self.callbacks = {
+            'peer_discovered': [],
+            'peer_lost': [],
+            'message_received': [],
+            'incoming_p2p_call': [],
+            'p2p_call_response': [],
+            'p2p_hang_up': [],
+            'hole_punch_successful': [],
+            'peer_not_found': [],
+            'incoming_contact_request': [],
+            'contact_request_response': [],
+            'message_deleted': [],
+            'message_edited': [],
+            'incoming_file_request': [],
+            'file_request_response': [],
+            'secure_channel_established': [],
+            'group_created': [],
+            'group_joined': [],
+            'group_left': [],
+            'group_message_received': [],
+            'history_received': [],
+            'incoming_group_invite': [],
+            'group_invite_response': [],
+            'incoming_group_call': [],
+            'group_call_response': [],
+            'group_call_hang_up': [],
+            'user_kicked': [],
+        }
+
         self.my_local_ip = self._get_local_ip()
         self.my_public_addr = None # (ip, port)
 
@@ -59,7 +81,29 @@ class P2PManager(QObject):
         if self.check_thread: self.check_thread.daemon = True
         if self.dht_thread: self.dht_thread.daemon = True
 
+    def register_callback(self, event_name, callback):
+        if event_name in self.callbacks:
+            self.callbacks[event_name].append(callback)
+
+    def _emit(self, event_name, *args):
+        if event_name in self.callbacks:
+            for callback in self.callbacks[event_name]:
+                callback(*args)
+
     def start(self):
+        try:
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if self.mode == 'local':
+                self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                self.udp_socket.bind(('', P2P_PORT))
+            else: # internet
+                self.udp_socket.bind(('', 0))
+        except OSError as e:
+            print(f"FATAL: Could not bind to port for P2P. Is another instance running? Error: {e}")
+            # self._emit('fatal_error', f"Port {P2P_PORT} is already in use.")
+            return
+
         if self.mode == 'local':
             if self.listen_thread: self.listen_thread.start()
             if self.broadcast_thread: self.broadcast_thread.start()
@@ -73,6 +117,12 @@ class P2PManager(QObject):
             self.dht_loop.call_soon_threadsafe(self.dht_loop.stop)
         print("P2P Manager stopped.")
 
+    def _pack_data(self, data):
+        return self.zstd_c.compress(msgpack.packb(data, use_bin_type=True))
+
+    def _unpack_data(self, packed_data):
+        return msgpack.unpackb(self.zstd_d.decompress(packed_data), raw=False)
+
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -85,12 +135,9 @@ class P2PManager(QObject):
         return IP
 
     def _get_public_address(self):
-        """Использует STUN для определения внешнего IP и порта."""
         print("Attempting to get public IP from STUN server...")
         try:
-            nat_type, external_ip, external_port = stun.get_ip_info(
-                stun_host=STUN_SERVER, stun_port=STUN_PORT
-            )
+            nat_type, external_ip, external_port = stun.get_ip_info(stun_host=STUN_SERVER, stun_port=STUN_PORT)
             self.my_public_addr = (external_ip, external_port)
             print(f"STUN Result: NAT Type={nat_type}, Public Address={self.my_public_addr}")
         except Exception as e:
@@ -98,83 +145,186 @@ class P2PManager(QObject):
             self.my_public_addr = (self.my_local_ip, P2P_PORT)
 
     def send_discovery_broadcast(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        message = json.dumps({'command': 'discovery', 'username': self.username}).encode('utf-8')
+        message = self._pack_data({'command': 'discovery', 'username': self.username})
         while self.running:
-            sock.sendto(message, (BROADCAST_ADDR, P2P_PORT))
+            self.udp_socket.sendto(message, (BROADCAST_ADDR, P2P_PORT))
             time.sleep(5)
-        sock.close()
 
     def listen_for_peers(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(('', P2P_PORT))
         while self.running:
             try:
-                data, addr = sock.recvfrom(1024)
-                if addr[0] == self.my_local_ip:
+                data, addr = self.udp_socket.recvfrom(4096) # Increased buffer for history
+                if addr[0] == self.my_local_ip or not data:
                     continue
-                message = json.loads(data.decode('utf-8'))
+                message = self._unpack_data(data)
                 self.process_p2p_command(message, addr)
             except Exception as e:
                 if self.running:
                     print(f"Error in P2P listener: {e}")
-        sock.close()
 
     def process_p2p_command(self, message, addr):
-        """Обрабатывает входящие P2P команды (локальные и через NAT)."""
         command = message.get('command')
         username = message.get('username')
         payload = message.get('payload')
 
         if command == 'discovery':
             if username and username not in self.peers:
-                self.peer_discovered.emit(username, addr[0])
+                self._emit('peer_discovered', username, addr[0])
+                self.send_public_key(username)
             if username:
                 self.peers[username] = {'local_ip': addr[0], 'public_addr': None, 'last_seen': time.time()}
-        elif command == 'message':
-            # The payload is the entire message dictionary
+        elif command == 'public_key':
+            if username and payload.get('key'):
+                self.encryption_manager.add_peer_public_key(username, payload['key'])
+                self.send_public_key(username, request_key=False)
+                self.initiate_session_key_exchange(username)
+        elif command == 'session_key':
+            if username and payload.get('key'):
+                if self.encryption_manager.receive_session_key(username, payload['key']):
+                    self._emit('secure_channel_established', username)
+                    self.request_history(username, 'global')
+        elif command == 'encrypted_message':
             if username and payload:
-                self.message_received.emit(payload)
+                decrypted_payload = self.encryption_manager.decrypt_message(username, payload)
+                if decrypted_payload:
+                    inner_message = json.loads(decrypted_payload)
+                    self.process_p2p_command(inner_message, addr)
+        elif command == 'request_history':
+            chat_id = payload.get('chat_id')
+            if chat_id and username:
+                history = self.chat_history.get(chat_id, [])
+                self._send_encrypted_command(username, 'history_response', {'chat_id': chat_id, 'history': history})
+        elif command == 'history_response':
+            chat_id = payload.get('chat_id')
+            history = payload.get('history')
+            if chat_id and history:
+                self._emit('history_received', chat_id, history)
+        elif command == 'message':
+            if username and payload:
+                self._emit('message_received', payload)
+        elif command == 'group_message':
+            group_id = payload.get('group_id')
+            message_data = payload.get('message_data')
+            if group_id and message_data and self.username in self.groups.get(group_id, {}).get('members', set()):
+                self._emit('group_message_received', group_id, message_data)
+                if self.groups[group_id]['admin'] == self.username:
+                    self.relay_group_message(group_id, message_data)
+        elif command == 'create_group':
+            group_id = payload.get('group_id')
+            group_name = payload.get('name')
+            if group_id and group_name and username:
+                self.groups[group_id] = {'name': group_name, 'members': {username}, 'admin': username}
+                self._emit('group_created', group_id, group_name, username)
+        elif command == 'join_group':
+            group_id = payload.get('group_id')
+            if group_id in self.groups and username:
+                self.groups[group_id]['members'].add(username)
+                self._emit('group_joined', group_id, username)
+        elif command == 'leave_group':
+            group_id = payload.get('group_id')
+            if group_id in self.groups and username in self.groups[group_id]['members']:
+                self.groups[group_id]['members'].remove(username)
+                self._emit('group_left', group_id, username)
+        elif command == 'group_invite':
+            group_id = payload.get('group_id')
+            group_name = payload.get('group_name')
+            if group_id and group_name and username:
+                self._emit('incoming_group_invite', group_id, group_name, username)
+        elif command == 'group_invite_response':
+            group_id = payload.get('group_id')
+            accepted = payload.get('accepted')
+            if group_id and accepted and username:
+                # Admin receives the acceptance, adds member, and notifies others
+                self.groups[group_id]['members'].add(username)
+                self._emit('group_joined', group_id, username) # Notify admin's UI
+                # Notify the new member that they have officially joined
+                self._send_encrypted_command(username, 'user_joined_group', {'group_id': group_id, 'group_info': self.groups[group_id]})
+                # Notify existing members
+                for member in self.groups[group_id]['members']:
+                    if member != self.username and member != username:
+                        self._send_encrypted_command(member, 'user_joined_group', {'group_id': group_id, 'username': username})
+            elif group_id and not accepted:
+                self._emit('group_invite_response', group_id, username, False)
+        elif command == 'user_joined_group':
+            group_id = payload.get('group_id')
+            new_username = payload.get('username')
+            group_info = payload.get('group_info')
+            if group_id and group_info: # For the user who just joined
+                self.groups[group_id] = group_info
+                self._emit('group_joined', group_id, self.username)
+            elif group_id and new_username: # For existing members
+                self.groups[group_id]['members'].add(new_username)
+                self._emit('group_joined', group_id, new_username)
         elif command == 'delete_message':
             msg_id = payload.get('id')
             if msg_id:
-                self.message_deleted.emit(msg_id)
+                self._emit('message_deleted', msg_id)
         elif command == 'edit_message':
             msg_id = payload.get('id')
             new_text = payload.get('text')
             if msg_id and new_text is not None:
-                self.message_edited.emit(msg_id, new_text)
+                self._emit('message_edited', msg_id, new_text)
         elif command == 'p2p_call_request':
             sample_rate = payload.get('sample_rate')
             if sample_rate:
-                self.incoming_p2p_call.emit(username, sample_rate)
+                self._emit('incoming_p2p_call', username, sample_rate)
         elif command == 'p2p_call_response':
             response = payload.get('response')
-            self.p2p_call_response.emit(username, response)
+            self._emit('p2p_call_response', username, response)
         elif command == 'p2p_hang_up':
-            self.p2p_hang_up.emit(username)
+            self._emit('p2p_hang_up', username)
         elif command == 'hole_punch_syn':
-            # Получили SYN, отвечаем ACK на тот же адрес
             print(f"Received hole punch SYN from {username} at {addr}. Sending ACK.")
             self.send_peer_command(username, 'hole_punch_ack', {}, force_address=addr)
         elif command == 'hole_punch_ack':
-            # Получили ACK, соединение установлено!
             print(f"Received hole punch ACK from {username} at {addr}. Hole punch successful!")
-            self.hole_punch_successful.emit(username, addr)
+            self._emit('hole_punch_successful', username, addr)
         elif command == 'file_transfer_request':
             filename = payload.get('filename')
             filesize = payload.get('filesize')
             port = payload.get('port')
-            # IP-адрес берем из самого пакета
             ip = addr[0]
             if filename and filesize and ip and port:
-                self.incoming_file_request.emit(username, filename, filesize, ip, port)
+                self._emit('incoming_file_request', username, filename, filesize, ip, port)
         elif command == 'file_transfer_response':
             accepted = payload.get('accepted')
             if accepted is not None:
-                self.file_request_response.emit(username, accepted)
+                self._emit('file_request_response', username, accepted)
+        elif command == 'group_call_request':
+            group_id = payload.get('group_id')
+            sample_rate = payload.get('sample_rate')
+            if group_id and sample_rate and username:
+                self._emit('incoming_group_call', group_id, username, sample_rate)
+        elif command == 'group_call_response':
+            group_id = payload.get('group_id')
+            response = payload.get('response')
+            if group_id and response and username:
+                self._emit('group_call_response', group_id, username, response)
+        elif command == 'group_call_hang_up':
+            group_id = payload.get('group_id')
+            if group_id and username:
+                self._emit('group_call_hang_up', group_id, username)
+        elif command == 'group_kick':
+            group_id = payload.get('group_id')
+            kicked_user = payload.get('kicked_user')
+            admin_user = payload.get('admin')
+            if group_id and kicked_user and admin_user and group_id in self.groups:
+                # Verify the sender is the admin
+                if self.groups[group_id]['admin'] == username:
+                    if kicked_user in self.groups[group_id]['members']:
+                        self.groups[group_id]['members'].remove(kicked_user)
+                    self._emit('user_kicked', group_id, kicked_user, admin_user)
+
+                if self.groups[group_id]['admin'] == username:
+                    if kicked_user in self.groups[group_id]['members']:
+                        self.groups[group_id]['members'].remove(kicked_user)
+                    self._emit('user_kicked', group_id, kicked_user, admin_user)
+        elif command == 'contact_request':
+            password_hash = payload.get('password_hash')
+            self._emit('incoming_contact_request', username, password_hash)
+        elif command == 'contact_response':
+            accepted = payload.get('accepted')
+            self._emit('contact_request_response', username, accepted)
 
     def check_peers(self):
         while self.running:
@@ -184,48 +334,28 @@ class P2PManager(QObject):
             for username in lost_peers:
                 if username in self.peers:
                     del self.peers[username]
-                    self.peer_lost.emit(username)
+                    self._emit('peer_lost', username)
+
+    def _send_encrypted_command(self, target_username, command, payload):
+        message_str = json.dumps({'command': command, 'username': self.username, 'payload': payload})
+        encrypted_payload = self.encryption_manager.encrypt_message(target_username, message_str)
+        if encrypted_payload:
+            self.send_peer_command(target_username, 'encrypted_message', encrypted_payload)
+        else:
+            print(f"Could not encrypt message for {target_username}")
 
     def broadcast_message(self, message_dict):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # The message_dict is now the payload
-        message_data = {'command': 'message', 'username': self.username, 'payload': message_dict}
-        message_bytes = json.dumps(message_data).encode('utf-8')
-        # No need for a lock if we're just iterating over a dictionary copy
-        for username, data in list(self.peers.items()):
-            addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
-            try:
-                sock.sendto(message_bytes, addr)
-            except Exception as e:
-                print(f"Could not send message to {username}: {e}")
-        sock.close()
+        for username in list(self.peers.keys()):
+            self._send_encrypted_command(username, 'message', message_dict)
 
     def broadcast_delete_message(self, msg_id):
-        """Sends a command to all peers to delete a message."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        message_data = {'command': 'delete_message', 'username': self.username, 'payload': {'id': msg_id}}
-        message_bytes = json.dumps(message_data).encode('utf-8')
-        for username, data in list(self.peers.items()):
-            addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
-            try:
-                sock.sendto(message_bytes, addr)
-            except Exception as e:
-                print(f"Could not send delete command to {username}: {e}")
-        sock.close()
+        for username in list(self.peers.keys()):
+            self._send_encrypted_command(username, 'delete_message', {'id': msg_id})
 
     def broadcast_edit_message(self, msg_id, new_text):
-        """Sends a command to all peers to edit a message."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         payload = {'id': msg_id, 'text': new_text}
-        message_data = {'command': 'edit_message', 'username': self.username, 'payload': payload}
-        message_bytes = json.dumps(message_data).encode('utf-8')
-        for username, data in list(self.peers.items()):
-            addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
-            try:
-                sock.sendto(message_bytes, addr)
-            except Exception as e:
-                print(f"Could not send edit command to {username}: {e}")
-        sock.close()
+        for username in list(self.peers.keys()):
+            self._send_encrypted_command(username, 'edit_message', payload)
 
     def send_peer_command(self, target_username, command, payload, force_address=None):
         if not force_address and target_username not in self.peers:
@@ -234,7 +364,7 @@ class P2PManager(QObject):
         
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         message_data = {'command': command, 'username': self.username, 'payload': payload}
-        message_bytes = json.dumps(message_data).encode('utf-8')
+        message_bytes = self._pack_data(message_data)
         
         addr = force_address
         if not addr:
@@ -255,12 +385,11 @@ class P2PManager(QObject):
         self.dht_loop.run_until_complete(self._dht_main())
 
     async def _dht_main(self):
-        # Сначала получаем наш публичный адрес
         await self.dht_loop.run_in_executor(None, self._get_public_address)
         
         bootstrap_nodes = [
             ("router.utorrent.com", 6881),
-            ("router.bittorrent.com", 6881),
+            ("router.bittrent.com", 6881),
             ("dht.transmissionbt.com", 6881),
             ("dht.aelitis.com", 6881)
         ]
@@ -294,19 +423,16 @@ class P2PManager(QObject):
                     'public_addr': tuple(peer_info.get('public_addr')) if peer_info.get('public_addr') else None,
                     'last_seen': time.time()
                 }
-                # Отправляем в GUI только основной IP для отображения
                 display_ip = (peer_info.get('public_addr') or [peer_info.get('local_ip')])[0]
-                QMetaObject.invokeMethod(
-                    self, "emit_peer_discovered", Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(str, username), Q_ARG(str, display_ip)
-                )
+                self._emit('peer_discovered', username, display_ip)
+                self.send_public_key(username)
             except (json.JSONDecodeError, TypeError, ValueError) as e:
                 print(f"Error parsing data for {username}: {e}")
         else:
             print(f"[DHT] User {username} not found.")
+            self._emit('peer_not_found', username)
 
     def initiate_hole_punch(self, target_username):
-        """Начинает процесс UDP hole punching."""
         if target_username not in self.peers:
             print(f"Cannot hole punch: {target_username} not found in peers.")
             return
@@ -317,19 +443,17 @@ class P2PManager(QObject):
 
         if not public_addr:
             print("Peer does not have a public address, trying local.")
-            # Если нет публичного, возможно, мы в одной сети
-            self.hole_punch_successful.emit(target_username, local_addr)
+            self._emit('hole_punch_successful', target_username, local_addr)
             return
 
-        # Начинаем отправлять SYN пакеты для "пробивки" NAT
         def puncher():
             for i in range(5):
                 if not self.running: break
                 print(f"Sending SYN to {target_username} at {public_addr} (attempt {i+1})")
-                syn_packet = json.dumps({'command': 'hole_punch_syn', 'username': self.username}).encode('utf-8')
+                syn_packet = self._pack_data({'command': 'hole_punch_syn', 'username': self.username})
                 try:
                     self.udp_socket.sendto(syn_packet, public_addr)
-                    self.udp_socket.sendto(syn_packet, local_addr) # И на локальный на всякий случай
+                    self.udp_socket.sendto(syn_packet, local_addr)
                 except Exception as e:
                     print(f"Error sending SYN: {e}")
                 time.sleep(0.5)
@@ -338,39 +462,137 @@ class P2PManager(QObject):
         punch_thread.daemon = True
         punch_thread.start()
 
-    @pyqtSlot(str, str)
-    def emit_peer_discovered(self, username, address):
-        self.peer_discovered.emit(username, address)
+    def send_public_key(self, target_username, request_key=True):
+        key_pem = self.encryption_manager.get_public_key_pem()
+        self.send_peer_command(target_username, 'public_key', {'key': key_pem, 'request': request_key})
+
+    def initiate_session_key_exchange(self, target_username):
+        _, encrypted_key = self.encryption_manager.generate_session_key(target_username)
+        if encrypted_key:
+            self.send_peer_command(target_username, 'session_key', {'key': encrypted_key})
 
     def send_p2p_call_request(self, target_username, sample_rate):
-        """Отправляет запрос на звонок указанному пользователю с указанием частоты дискретизации."""
-        self.send_peer_command(target_username, 'p2p_call_request', {'sample_rate': sample_rate})
+        self._send_encrypted_command(target_username, 'p2p_call_request', {'sample_rate': sample_rate})
 
     def send_p2p_call_response(self, target_username, response):
-        """Отправляет ответ на запрос о звонке ('accept', 'reject', 'busy')."""
-        self.send_peer_command(target_username, 'p2p_call_response', {'response': response})
+        self._send_encrypted_command(target_username, 'p2p_call_response', {'response': response})
 
     def send_p2p_hang_up(self, target_username):
-        """Сообщает другому пиру о завершении звонка."""
-        self.send_peer_command(target_username, 'p2p_hang_up', {})
+        self._send_encrypted_command(target_username, 'p2p_hang_up', {})
 
     def send_file_transfer_request(self, target_username, filename, filesize, port):
-        """Отправляет запрос на передачу файла."""
         payload = {
             'filename': filename,
             'filesize': filesize,
             'port': port
         }
-        self.send_peer_command(target_username, 'file_transfer_request', payload)
+        self._send_encrypted_command(target_username, 'file_transfer_request', payload)
 
     def send_file_transfer_response(self, target_username, accepted):
-        """Отправляет ответ на запрос о передаче файла."""
-        self.send_peer_command(target_username, 'file_transfer_response', {'accepted': accepted})
+        self._send_encrypted_command(target_username, 'file_transfer_response', {'accepted': accepted})
 
     def get_peer_username_by_addr(self, address):
-        """Находит имя пользователя по его адресу."""
         for uname, data in self.peers.items():
             peer_addr = data.get('public_addr') or (data.get('local_ip'), P2P_PORT)
             if peer_addr == address:
                 return uname
         return None
+
+    def create_group(self, group_name):
+        group_id = str(time.time())
+        self.groups[group_id] = {'name': group_name, 'members': {self.username}, 'admin': self.username}
+        self._emit('group_created', group_id, group_name, self.username)
+
+    def join_group(self, group_id, admin_username):
+        self._send_encrypted_command(admin_username, 'join_group', {'group_id': group_id})
+
+    def leave_group(self, group_id):
+        admin = self.groups[group_id]['admin']
+        self._send_encrypted_command(admin, 'leave_group', {'group_id': group_id})
+
+    def send_group_message(self, group_id, message_data):
+        admin = self.groups[group_id]['admin']
+        payload = {'group_id': group_id, 'message_data': message_data}
+        self._send_encrypted_command(admin, 'group_message', payload)
+
+    def relay_group_message(self, group_id, message_data):
+        for member in self.groups[group_id]['members']:
+            if member != self.username and member != message_data['sender']:
+                self._send_encrypted_command(member, 'group_message', {'group_id': group_id, 'message_data': message_data})
+
+    def request_history(self, target_username, chat_id):
+        self._send_encrypted_command(target_username, 'request_history', {'chat_id': chat_id})
+
+    def send_group_invite(self, group_id, target_username):
+        if self.groups[group_id]['admin'] != self.username:
+            print("Error: Only admin can invite users.")
+            return
+        group_name = self.groups[group_id]['name']
+        payload = {'group_id': group_id, 'group_name': group_name}
+        self._send_encrypted_command(target_username, 'group_invite', payload)
+
+    def send_group_invite_response(self, group_id, admin_username, accepted):
+        payload = {'group_id': group_id, 'accepted': accepted}
+        self._send_encrypted_command(admin_username, 'group_invite_response', payload)
+
+    def start_group_call(self, group_id, sample_rate):
+        if self.groups[group_id]['admin'] != self.username:
+            print("Error: Only admin can start a group call.")
+            return
+        payload = {'group_id': group_id, 'sample_rate': sample_rate}
+        for member in self.groups[group_id]['members']:
+            if member != self.username:
+                self._send_encrypted_command(member, 'group_call_request', payload)
+
+    def send_group_call_response(self, group_id, response):
+        payload = {'group_id': group_id, 'response': response}
+        for member in self.groups[group_id]['members']:
+            if member != self.username:
+                self._send_encrypted_command(member, 'group_call_response', payload)
+
+    def send_group_hang_up(self, group_id):
+        payload = {'group_id': group_id}
+        for member in self.groups[group_id]['members']:
+            if member != self.username:
+                self._send_encrypted_command(member, 'group_call_hang_up', payload)
+
+    def kick_user_from_group(self, group_id, username_to_kick):
+        if group_id not in self.groups:
+            print(f"Error: Group {group_id} not found.")
+            return
+        if self.groups[group_id]['admin'] != self.username:
+            print("Error: Only the admin can kick users.")
+            return
+        if username_to_kick == self.username:
+            print("Error: Admin cannot kick themselves.")
+            return
+
+        print(f"Admin {self.username} kicking {username_to_kick} from {group_id}")
+        payload = {
+            'group_id': group_id,
+            'kicked_user': username_to_kick,
+            'admin': self.username
+        }
+        
+        # Notify all members, including the one being kicked
+        members_to_notify = list(self.groups[group_id]['members'])
+        for member in members_to_notify:
+            if member != self.username: # Admin already knows
+                 self._send_encrypted_command(member, 'group_kick', payload)
+
+        # Locally remove the user and emit the event for the admin's UI
+        if username_to_kick in self.groups[group_id]['members']:
+            self.groups[group_id]['members'].remove(username_to_kick)
+        self._emit('user_kicked', group_id, username_to_kick, self.username)
+
+    def send_contact_request(self, target_username, password_hash=None):
+        """Sends a contact request to a user, optionally with a password hash."""
+        payload = {'password_hash': password_hash}
+        # Contact requests are not encrypted with session keys as they are pre-session.
+        # They are sent in plain text (or could be encrypted with the password itself).
+        self.send_peer_command(target_username, 'contact_request', payload)
+
+    def send_contact_response(self, target_username, accepted):
+        """Responds to a contact request."""
+        # This response should be encrypted as the session key exchange should have happened.
+        self._send_encrypted_command(target_username, 'contact_response', {'accepted': accepted})

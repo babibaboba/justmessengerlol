@@ -1,59 +1,84 @@
 import os
-import importlib.util
+import importlib
+import inspect
 import sys
 
 class PluginManager:
-    def __init__(self, plugin_folder='plugins'):
-        self.plugin_folder = plugin_folder
+    """
+    Manages the discovery, loading, and lifecycle of plugins.
+    """
+    def __init__(self, app):
+        self.app = app
         self.plugins = []
-        self.hooks = {}
+        # Correctly determine the plugins directory relative to this file's location
+        self.plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plugins')
+        if not os.path.exists(self.plugins_dir):
+            os.makedirs(self.plugins_dir)
+        # Add plugins directory to Python path to allow direct imports
+        if self.plugins_dir not in sys.path:
+            sys.path.insert(0, self.plugins_dir)
 
-    def discover_plugins(self):
-        """Находит и загружает плагины из указанной папки."""
-        if not os.path.exists(self.plugin_folder):
-            print(f"Plugin folder '{self.plugin_folder}' not found.")
-            return
 
-        for item in os.listdir(self.plugin_folder):
-            item_path = os.path.join(self.plugin_folder, item)
-            if os.path.isdir(item_path):
-                self.load_plugin(item_path)
+    def discover_and_load_plugins(self):
+        """Finds and loads all plugins from the plugins directory."""
+        print(f"Discovering plugins in: {self.plugins_dir}")
+        for item in os.listdir(self.plugins_dir):
+            if item.endswith('_plugin.py'):
+                module_name = item[:-3]
+                self._load_plugin_from_module(module_name)
+        
+        # Initialize loaded plugins after all have been loaded
+        for plugin_instance in self.plugins:
+            try:
+                plugin_instance.initialize()
+            except Exception as e:
+                print(f"Error initializing plugin {plugin_instance.__class__.__name__}: {e}")
 
-    def load_plugin(self, plugin_path):
-        """Загружает отдельный плагин."""
-        main_file = os.path.join(plugin_path, 'main.py')
-        if not os.path.exists(main_file):
-            return
 
+    def _load_plugin_from_module(self, module_name):
         try:
-            spec = importlib.util.spec_from_file_location(f"plugin.{os.path.basename(plugin_path)}", main_file)
-            plugin_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(plugin_module)
-            
-            # Предполагается, что в плагине есть функция initialize()
-            if hasattr(plugin_module, 'initialize'):
-                plugin_instance = plugin_module.initialize(self)
-                self.plugins.append(plugin_instance)
-                print(f"Loaded plugin: {os.path.basename(plugin_path)}")
-
+            # We can import directly since the path is in sys.path
+            module = importlib.import_module(module_name)
+            for name, obj in inspect.getmembers(module):
+                # Load classes that inherit from BasePlugin and are not BasePlugin itself
+                if inspect.isclass(obj) and issubclass(obj, BasePlugin) and obj is not BasePlugin:
+                    # Instantiate the plugin, passing the app instance
+                    plugin_instance = obj(self.app)
+                    self.plugins.append(plugin_instance)
+                    print(f"Loaded plugin: {name}")
         except Exception as e:
-            print(f"Failed to load plugin from {plugin_path}: {e}")
+            print(f"Failed to load plugin from {module_name}: {e}")
 
-    def register_hook(self, hook_name, function):
-        """Регистрирует функцию для определенного хука."""
-        if hook_name not in self.hooks:
-            self.hooks[hook_name] = []
-        self.hooks[hook_name].append(function)
+    def unload_plugins(self):
+        """Calls the cleanup method on all loaded plugins."""
+        for plugin in self.plugins:
+            try:
+                plugin.unload()
+            except Exception as e:
+                print(f"Error unloading plugin {plugin.__class__.__name__}: {e}")
+        self.plugins = []
 
-    def trigger_hook(self, hook_name, *args, **kwargs):
+class BasePlugin:
+    """
+    Base class for all plugins.
+    Plugins should inherit from this class.
+    """
+    def __init__(self, app):
         """
-        Вызывает все функции, зарегистрированные для хука.
-        Если какая-либо из функций-обработчиков вернет False,
-        то дальнейшее выполнение прерывается и возвращается False.
+        Initializes the plugin.
+        :param app: The main VoiceChatApp instance.
         """
-        if hook_name in self.hooks:
-            for function in self.hooks[hook_name]:
-                result = function(*args, **kwargs)
-                if result is False:
-                    return False
-        return True
+        self.app = app
+
+    def initialize(self):
+        """
+        Called after all plugins are loaded. Use this to set up UI elements,
+        register callbacks, etc.
+        """
+        pass
+
+    def unload(self):
+        """
+        Called when the application is shutting down. Use this for cleanup.
+        """
+        pass

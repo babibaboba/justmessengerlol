@@ -1,5 +1,12 @@
-PyQt6
-PyAudio
-kademlia
-pystun3
-sounddevice
+PyAudio>=0.2.11
+kivy>=2.1.0
+pystun3>=0.1.2
+msgpack>=1.0.3
+zstandard>=0.17.0
+cryptography>=36.0.1
+kademlia>=1.4.3
+Pillow>=9.0.1
+pynput>=1.7.6
+pybluez-updated
+pycaw>=20220410
+comtypes>=1.1.10

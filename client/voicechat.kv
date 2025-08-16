@@ -1,0 +1,135 @@
+#:kivy 2.1.0
+
+<TitleBar>:
+    size_hint_y: None
+    height: 32
+    orientation: 'horizontal'
+    padding: 4
+
+    Label:
+        id: title
+        text: "Voice Chat"
+        size_hint_x: 1.0
+
+    Button:
+        id: minimize_btn
+        text: '_'
+        size_hint_x: None
+        width: 32
+    Button:
+        id: maximize_btn
+        text: '[]'
+        size_hint_x: None
+        width: 32
+    Button:
+        id: close_btn
+        text: 'X'
+        size_hint_x: None
+        width: 32
+
+<RootLayout>:
+    orientation: 'vertical'
+    
+    TitleBar:
+        id: title_bar
+    
+    ChatLayout:
+        id: chat_layout
+
+<ChatLayout>:
+    orientation: 'horizontal'
+    spacing: 10
+    padding: 10
+
+    BoxLayout:
+        id: chat_panel
+        orientation: 'vertical'
+        size_hint_x: 0.7
+
+        ScrollView:
+            id: chat_scroll
+            scroll_type: ['bars', 'content']
+            bar_width: 10
+            BoxLayout:
+                id: chat_box
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: 5
+
+        BoxLayout:
+            id: input_layout
+            size_hint_y: None
+            height: 40
+            spacing: 5
+            TextInput:
+                id: msg_entry
+                multiline: False
+                hint_text: "Type a message..."
+            Button:
+                id: record_button
+                text: '🎤'
+                font_name: 'C:/Windows/Fonts/seguiemj.ttf'
+                size_hint_x: None
+                width: 40
+            Button:
+                id: emoji_button
+                text: '🙂'
+                font_name: 'C:/Windows/Fonts/seguiemj.ttf'
+                size_hint_x: None
+                width: 40
+            Button:
+                id: send_button
+                text: 'Send'
+                size_hint_x: None
+                width: 80
+
+    BoxLayout:
+        id: users_panel
+        orientation: 'vertical'
+        size_hint_x: 0.3
+        spacing: 5
+
+        BoxLayout:
+            id: users_panel_controls
+            orientation: 'vertical'
+            size_hint_y: None
+            height: self.minimum_height
+            spacing: 5
+            padding: (0, 5)
+
+            BoxLayout:
+                id: group_actions_layout
+                size_hint_y: None
+                height: 40
+                spacing: 5
+            
+            Label:
+                id: users_list_label
+                text: 'Users Online'
+                size_hint_y: None
+                height: 30
+        
+        ScrollView:
+            id: users_scroll
+            scroll_type: ['bars', 'content']
+            bar_width: 10
+            BoxLayout:
+                id: users_list
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+        
+        BoxLayout:
+            size_hint_y: None
+            height: 44
+            spacing: 5
+            Button:
+                id: settings_button
+                text: '⚙️'
+                font_name: 'C:/Windows/Fonts/seguiemj.ttf'
+                size_hint_x: None
+                width: 44
+            Button:
+                id: theme_button
+                text: 'Toggle Theme'
