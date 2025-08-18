@@ -56,6 +56,7 @@
                 size_hint_y: None
                 height: self.minimum_height
                 spacing: 5
+                # The font_name for labels is set dynamically in client.py
 
         BoxLayout:
             id: input_layout
@@ -66,16 +67,17 @@
                 id: msg_entry
                 multiline: False
                 hint_text: "Type a message..."
+                font_name: 'EmojiFont'
             Button:
                 id: record_button
                 text: '🎤'
-                font_name: 'C:/Windows/Fonts/seguiemj.ttf'
+                font_name: 'EmojiFont'
                 size_hint_x: None
                 width: 40
             Button:
                 id: emoji_button
                 text: '🙂'
-                font_name: 'C:/Windows/Fonts/seguiemj.ttf'
+                font_name: 'EmojiFont'
                 size_hint_x: None
                 width: 40
             Button:
@@ -127,7 +129,7 @@
             Button:
                 id: settings_button
                 text: '⚙️'
-                font_name: 'C:/Windows/Fonts/seguiemj.ttf'
+                font_name: 'EmojiFont'
                 size_hint_x: None
                 width: 44
             Button:

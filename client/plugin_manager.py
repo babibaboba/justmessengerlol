@@ -10,6 +10,7 @@ class PluginManager:
     def __init__(self, app):
         self.app = app
         self.plugins = []
+        self.themed_widgets = [] # To hold widgets that need styling
         # Correctly determine the plugins directory relative to this file's location
         self.plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plugins')
         if not os.path.exists(self.plugins_dir):
@@ -18,6 +19,10 @@ class PluginManager:
         if self.plugins_dir not in sys.path:
             sys.path.insert(0, self.plugins_dir)
 
+    def register_themed_widget(self, widget):
+        """Allows plugins to register a widget to be themed by the main app."""
+        if widget not in self.themed_widgets:
+            self.themed_widgets.append(widget)
 
     def discover_and_load_plugins(self):
         """Finds and loads all plugins from the plugins directory."""

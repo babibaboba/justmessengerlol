@@ -175,9 +175,19 @@ class P2PManager:
                 self.peers[username] = {'local_ip': addr[0], 'public_addr': None, 'last_seen': time.time()}
         elif command == 'public_key':
             if username and payload.get('key'):
-                self.encryption_manager.add_peer_public_key(username, payload['key'])
-                self.send_public_key(username, request_key=False)
-                self.initiate_session_key_exchange(username)
+                if self.encryption_manager.add_peer_public_key(username, payload['key']):
+                    print(f"Added public key for {username}.")
+                    # Respond with our own public key if they requested it.
+                    if payload.get('request', True):
+                        self.send_public_key(username, request_key=False)
+
+                    # To avoid both peers initiating, establish a convention.
+                    # For example, the peer with the lexicographically greater username initiates.
+                    if self.username > username:
+                        print(f"My username '{self.username}' is greater than '{username}', initiating session key exchange.")
+                        self.initiate_session_key_exchange(username)
+                    else:
+                        print(f"My username '{self.username}' is not greater than '{username}', waiting for them to initiate.")
         elif command == 'session_key':
             if username and payload.get('key'):
                 if self.encryption_manager.receive_session_key(username, payload['key']):
@@ -396,15 +406,23 @@ class P2PManager:
         await self.dht_node.listen(P2P_PORT)
         
         print("[DHT] Bootstrapping with nodes:", bootstrap_nodes)
-        found_neighbors = await self.dht_node.bootstrap(bootstrap_nodes)
-        print(f"[DHT] Bootstrap complete. Found {len(found_neighbors)} neighbors.")
+        try:
+            found_neighbors = await self.dht_node.bootstrap(bootstrap_nodes)
+            print(f"[DHT] Bootstrap complete. Found {len(found_neighbors)} neighbors.")
+        except Exception as e:
+            print(f"[DHT] Bootstrap failed: {e}")
 
         while self.running:
-            my_address_info = json.dumps({
-                'local_ip': self.my_local_ip,
-                'public_addr': self.my_public_addr
-            })
-            await self.dht_node.set(self.username, my_address_info)
+            try:
+                my_address_info = json.dumps({
+                    'local_ip': self.my_local_ip,
+                    'public_addr': self.my_public_addr
+                })
+                print(f"[DHT] Setting my info: {my_address_info}")
+                await self.dht_node.set(self.username, my_address_info)
+                print(f"[DHT] Successfully set info for {self.username}")
+            except Exception as e:
+                print(f"[DHT] Error setting DHT value: {e}")
             await asyncio.sleep(60)
 
     def find_peer(self, username):
@@ -413,23 +431,31 @@ class P2PManager:
 
     async def _async_find_peer(self, username):
         print(f"[DHT] Searching for {username}...")
-        found_value = await self.dht_node.get(username)
-        if found_value:
-            print(f"[DHT] Found {username} with data: {found_value}")
-            try:
+        try:
+            found_value = await self.dht_node.get(username)
+            if found_value:
+                print(f"[DHT] Found {username} with data: {found_value}")
                 peer_info = json.loads(found_value)
+                
+                # Ensure public_addr is a tuple if it exists
+                public_addr = peer_info.get('public_addr')
+                if public_addr and isinstance(public_addr, list):
+                    public_addr = tuple(public_addr)
+
                 self.peers[username] = {
                     'local_ip': peer_info.get('local_ip'),
-                    'public_addr': tuple(peer_info.get('public_addr')) if peer_info.get('public_addr') else None,
+                    'public_addr': public_addr,
                     'last_seen': time.time()
                 }
-                display_ip = (peer_info.get('public_addr') or [peer_info.get('local_ip')])[0]
+                
+                display_ip = (public_addr[0] if public_addr else peer_info.get('local_ip'))
                 self._emit('peer_discovered', username, display_ip)
-                self.send_public_key(username)
-            except (json.JSONDecodeError, TypeError, ValueError) as e:
-                print(f"Error parsing data for {username}: {e}")
-        else:
-            print(f"[DHT] User {username} not found.")
+                self.send_public_key(username) # Start key exchange
+            else:
+                print(f"[DHT] User {username} not found.")
+                self._emit('peer_not_found', username)
+        except Exception as e:
+            print(f"[DHT] Error during find_peer for {username}: {e}")
             self._emit('peer_not_found', username)
 
     def initiate_hole_punch(self, target_username):

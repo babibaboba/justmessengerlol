@@ -9,7 +9,7 @@ class AudioRecorder:
         self.chunk = 1024
         self.format = pyaudio.paInt16
         self.channels = 1
-        self.rate = 16000  # Use a common rate for voice
+        self.rate = 44100  # Use a standard rate for audio
         self.input_device_index = input_device_index
 
         self.frames = []

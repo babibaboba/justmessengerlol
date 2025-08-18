@@ -168,13 +168,17 @@ class FileTransferPlugin(BasePlugin):
         chat_ids = self.app.root.ids.chat_layout.ids
         self.attach_button = Button(
             text=self.app.tr.get('attach_button', '📎'),
-            font_name='C:/Windows/Fonts/seguiemj.ttf', # Font for emoji
+            font_name='EmojiFont', # Use the registered font alias
             size_hint_x=None,
             width=40
         )
         self.attach_button.bind(on_press=self.select_user_for_file_transfer)
         # Add it next to the send button, for example
         chat_ids.input_layout.add_widget(self.attach_button, 2) # Adjust index based on new emoji button
+
+        # Register the button for theming
+        if self.app.plugin_manager:
+            self.app.plugin_manager.register_themed_widget(self.attach_button)
 
         # Register callbacks with the P2P manager if it exists
         if self.app.p2p_manager:

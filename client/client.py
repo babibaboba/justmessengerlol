@@ -26,6 +26,7 @@ from kivy.core.window import Window
 from kivy.graphics import Color, Rectangle
 from kivy.animation import Animation
 from kivy.core.audio import SoundLoader
+from kivy.core.text import LabelBase
 
 # --- Set borderless before anything else ---
 Window.borderless = True
@@ -44,6 +45,7 @@ try:
     from audio_recorder import AudioRecorder
     from audio_manager import AudioManager
     from plugin_manager import PluginManager
+    from emoji_manager import EmojiManager
 except ImportError as e: print(f"Import Error: {e}"); sys.exit(1)
 
 # --- Constants ---
@@ -156,7 +158,7 @@ class CallPopup(AnimatedPopup):
         super().__init__(**kwargs)
         self.tr = translator
         self.is_muted = False
-        self.title = self.tr.get('call_window_title', peer_username=peer_username)
+        self.title = self.tr.get('call_title', 'Call')
         self.size_hint = (0.6, 0.4)
         self.auto_dismiss = False
         layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
@@ -218,30 +220,44 @@ class ContactRequestPopup(AnimatedPopup):
         pass
 
 class EmojiPopup(AnimatedPopup):
-    def __init__(self, translator, **kwargs):
+    def __init__(self, translator, emoji_manager, **kwargs):
         super().__init__(**kwargs)
         self.tr = translator
+        self.emoji_manager = emoji_manager
         self.title = self.tr.get('emoji_popup_title', 'Select Emoji')
-        self.size_hint = (None, None)
-        self.size = (400, 300)
-        
-        # Popular emojis
-        emojis = [
-            '🙂', '😂', '❤️', '👍', '🤔', '🎉', '🙏', '🔥',
-            '😊', '😭', '😍', '👎', '🙄', '👏', '😢', '😎'
-        ]
-        
-        grid = GridLayout(cols=4, spacing=10, padding=10)
-        for emoji in emojis:
-            btn = Button(
-                text=emoji,
-                font_name='C:/Windows/Fonts/seguiemj.ttf',
-                font_size='24sp'
-            )
-            btn.bind(on_press=self.select_emoji)
-            grid.add_widget(btn)
+        self.size_hint = (0.9, 0.8)
+
+        # Main layout with TabbedPanel
+        main_layout = BoxLayout(orientation='vertical')
+        tab_panel = TabbedPanel(do_default_tab=False, tab_pos='top_left')
+
+        # Get categorized emojis
+        categorized_emojis = self.emoji_manager.get_categorized_emojis()
+
+        for category, emojis in categorized_emojis.items():
+            # Create a tab for each category
+            tab = TabbedPanelHeader(text=category)
             
-        self.content = grid
+            # Scrollable grid for emojis in the tab
+            scroll_view = ScrollView()
+            grid = GridLayout(cols=8, spacing=5, size_hint_y=None)
+            grid.bind(minimum_height=grid.setter('height'))
+            
+            for emoji in emojis:
+                btn = Button(
+                    text=emoji,
+                    font_name='EmojiFont', # Use the registered font
+                    font_size='24sp'
+                )
+                btn.bind(on_press=self.select_emoji)
+                grid.add_widget(btn)
+            
+            scroll_view.add_widget(grid)
+            tab.content = scroll_view
+            tab_panel.add_widget(tab)
+
+        main_layout.add_widget(tab_panel)
+        self.content = main_layout
         self.register_event_type('on_select')
 
     def select_emoji(self, instance):
@@ -455,6 +471,7 @@ class SettingsPopup(AnimatedPopup):
         self.listener = None
         self.is_testing = False
         self.test_sound = None
+        self.p_audio = pyaudio.PyAudio() # Create a shared PyAudio instance
 
         # --- Main Layout ---
         main_layout = BoxLayout(orientation='vertical', spacing=5, padding=10)
@@ -484,7 +501,7 @@ class SettingsPopup(AnimatedPopup):
         save_btn = Button(text=self.tr.get('save_button'))
         save_btn.bind(on_press=self.save_and_dismiss)
         cancel_btn = Button(text=self.tr.get('cancel_button', 'Cancel'))
-        cancel_btn.bind(on_press=self.dismiss)
+        cancel_btn.bind(on_press=self.cancel_and_dismiss)
         btn_layout.add_widget(save_btn)
         btn_layout.add_widget(cancel_btn)
         main_layout.add_widget(btn_layout)
@@ -557,51 +574,46 @@ class SettingsPopup(AnimatedPopup):
         input_device_index = self._get_selected_device_index('input')
         output_device_index = self._get_selected_device_index('output')
 
-        def test_mic_thread():
+        def test_mic_thread_inner():
             try:
-                audio = pyaudio.PyAudio()
-                # Record
-                stream_in = audio.open(format=pyaudio.paInt16, channels=1, rate=44100,
-                                       input=True, frames_per_buffer=1024,
-                                       input_device_index=input_device_index)
+                stream_in = self.p_audio.open(format=pyaudio.paInt16, channels=1, rate=44100,
+                                     input=True, frames_per_buffer=CHUNK,
+                                     input_device_index=input_device_index)
                 frames = []
-                for _ in range(0, int(44100 / 1024 * 2)): # 2 seconds
-                    data = stream_in.read(1024)
+                for _ in range(0, int(44100 / CHUNK * 2)): # 2 seconds
+                    data = stream_in.read(CHUNK, exception_on_overflow=False)
                     frames.append(data)
                 stream_in.stop_stream()
                 stream_in.close()
                 
-                # Playback
-                stream_out = audio.open(format=pyaudio.paInt16, channels=1, rate=44100,
-                                        output=True, frames_per_buffer=1024,
-                                        output_device_index=output_device_index)
+                stream_out = self.p_audio.open(format=pyaudio.paInt16, channels=1, rate=44100,
+                                      output=True, frames_per_buffer=CHUNK,
+                                      output_device_index=output_device_index)
                 for data in frames:
                     stream_out.write(data)
                 stream_out.stop_stream()
                 stream_out.close()
-                audio.terminate()
             except Exception as e:
                 print(f"Mic test error: {e}")
+                pass
             finally:
-                def reset_test_button(dt):
-                    instance.disabled = False
-                    instance.text = self.tr.get('test_mic_button', 'Test')
-                    self.is_testing = False
-                Clock.schedule_once(reset_test_button, 0)
+                Clock.schedule_once(lambda dt: self.reset_test_button_state(instance, 'test_mic_button'), 0)
 
-        threading.Thread(target=test_mic_thread, daemon=True).start()
+        threading.Thread(target=test_mic_thread_inner, daemon=True).start()
 
     def test_output_device(self, instance):
         if self.is_testing:
             return
         
+        self.is_testing = True
+        instance.disabled = True
+        instance.text = self.tr.get('testing_button', 'Testing...')
+
         output_device_index = self._get_selected_device_index('output')
         
-        # Stop previous sound if playing
         if self.test_sound and self.test_sound.state == 'play':
             self.test_sound.stop()
 
-        # Generate a simple sine wave to avoid needing a file
         import wave
         import numpy as np
         import io
@@ -624,36 +636,35 @@ class SettingsPopup(AnimatedPopup):
         
         wav_buffer.seek(0)
 
-        # Kivy's SoundLoader can't load from memory directly with a specific output,
-        # so we use pyaudio for playback.
-        def test_speaker_thread():
-            self.is_testing = True
-            instance.disabled = True
+        def test_speaker_thread_inner():
             try:
                 with wave.open(wav_buffer, 'rb') as wf:
-                    p = pyaudio.PyAudio()
-                    stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                    stream = self.p_audio.open(format=self.p_audio.get_format_from_width(wf.getsampwidth()),
                                     channels=wf.getnchannels(),
                                     rate=wf.getframerate(),
                                     output=True,
                                     output_device_index=output_device_index)
                     
-                    data = wf.readframes(1024)
+                    data = wf.readframes(CHUNK)
                     while data:
                         stream.write(data)
-                        data = wf.readframes(1024)
+                        data = wf.readframes(CHUNK)
 
                     stream.stop_stream()
                     stream.close()
-                    p.terminate()
             except Exception as e:
                 print(f"Speaker test error: {e}")
+                pass
             finally:
-                instance.disabled = False
-                self.is_testing = False
+                Clock.schedule_once(lambda dt: self.reset_test_button_state(instance, 'test_speaker_button'), 0)
 
-        threading.Thread(target=test_speaker_thread, daemon=True).start()
+        threading.Thread(target=test_speaker_thread_inner, daemon=True).start()
 
+    @mainthread
+    def reset_test_button_state(self, instance, button_key):
+        instance.disabled = False
+        instance.text = self.tr.get(button_key, 'Test')
+        self.is_testing = False
 
     def toggle_record(self, instance):
         self.recording = not self.recording
@@ -672,7 +683,6 @@ class SettingsPopup(AnimatedPopup):
             self.hotkey_label.text = ' + '.join(self.key_to_str(k) for k in self.new_hotkey)
 
     def on_release(self, key):
-        # Stop recording once a combination is released
         if self.recording:
             self.toggle_record(None)
 
@@ -727,17 +737,21 @@ class SettingsPopup(AnimatedPopup):
         self.stop_listener()
         self.hotkey = self.new_hotkey
         
-        # Save audio device settings
         self.config['input_device_index'] = self._get_selected_device_index('input')
         self.config['output_device_index'] = self._get_selected_device_index('output')
         self.config['input_volume'] = int(self.input_volume_slider.value)
         self.config['output_volume'] = int(self.output_volume_slider.value)
         
-        # Save security settings
         if 'security' not in self.config:
             self.config['security'] = {}
         self.config['security']['p2p_password'] = self.p2p_password_input.text
-            
+        
+        self.p_audio.terminate()
+        self.dismiss()
+
+    def cancel_and_dismiss(self, instance):
+        self.stop_listener()
+        self.p_audio.terminate()
         self.dismiss()
 
     @staticmethod
@@ -749,7 +763,6 @@ class SettingsPopup(AnimatedPopup):
         return str(key)
 
     def on_input_device_change(self, spinner, text):
-        # Update volume slider when device changes
         self.input_volume_slider.value = self.get_current_volume('input')
 
     def on_output_device_change(self, spinner, text):
@@ -772,21 +785,20 @@ class SettingsPopup(AnimatedPopup):
         if device_index is not None and self.audio_manager:
             volume = self.audio_manager.get_volume(device_index, device_type)
         
-        # First, try the volume from the device
         if volume is not None:
             return int(volume)
             
-        # If that fails, try the saved config value
         config_volume = self.config.get(f'{device_type}_volume')
         if config_volume is not None:
             return int(config_volume)
             
-        # If all else fails, return a safe default
         return 100
 
 
 class VoiceChatApp(App):
     def build(self):
+        # Register emoji font
+        LabelBase.register(name='EmojiFont', fn_regular='C:/Windows/Fonts/seguiemj.ttf')
         return RootLayout()
 
     def on_start(self):
@@ -813,6 +825,7 @@ class VoiceChatApp(App):
         self.audio_recorder = None
         self.audio_manager = None
         self.plugin_manager = None
+        self.emoji_manager = None
         self.root.opacity = 0
         self.contacts = set() # Users who have accepted contact requests
         self.search_user_input = None
@@ -992,6 +1005,7 @@ class VoiceChatApp(App):
         # Initialize and load plugins
         self.plugin_manager = PluginManager(self)
         self.plugin_manager.discover_and_load_plugins()
+        self.emoji_manager = EmojiManager()
         
         chat_ids.msg_entry.focus = True
 
@@ -1144,6 +1158,13 @@ class VoiceChatApp(App):
             if isinstance(child, Button):
                 child.background_color = theme['button_bg']
                 child.color = theme['button_text']
+        
+        # Apply theme to registered plugin widgets
+        if self.plugin_manager:
+            for widget in self.plugin_manager.themed_widgets:
+                if isinstance(widget, Button):
+                    widget.background_color = theme['button_bg']
+                    widget.color = theme['button_text']
 
     def send_message(self, instance=None):
         text = self.root.ids.chat_layout.ids.msg_entry.text.strip()
@@ -1406,7 +1427,7 @@ class VoiceChatApp(App):
                 label_height = 40
         # --- End Emoji Size Logic ---
 
-        label = Label(text=display_text, size_hint_y=None, height=label_height, halign='left', valign='top', color=theme['text'], opacity=0, font_size=font_size)
+        label = Label(text=display_text, size_hint_y=None, height=label_height, halign='left', valign='top', color=theme['text'], opacity=0, font_size=font_size, font_name='EmojiFont')
         label.bind(width=lambda *x: label.setter('text_size')(label, (label.width, None)))
         chat_box.add_widget(label)
         anim = Animation(opacity=1, d=0.3)
@@ -1933,7 +1954,9 @@ class VoiceChatApp(App):
             # self.update_user_list(group_id) # TODO: Need a way to show group members
 
     def show_emoji_popup(self, instance):
-        popup = EmojiPopup(translator=self.tr)
+        if not self.emoji_manager:
+            self.emoji_manager = EmojiManager()
+        popup = EmojiPopup(translator=self.tr, emoji_manager=self.emoji_manager)
         popup.bind(on_select=self.add_emoji_to_input)
         popup.open()
 
