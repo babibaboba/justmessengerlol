@@ -251,6 +251,29 @@ class FileTransferPlugin(BasePlugin):
         if filepath:
             self.send_filepath(filepath, self.selected_user_for_file)
 
+    def handle_dropped_file(self, filepath):
+        """Handles a file that was dropped onto the main window."""
+        if not self.app.p2p_manager or not self.app.p2p_manager.peers:
+            self.app.add_message_to_box("System: No users online to send a file to.", 'global')
+            return
+
+        # We have the filepath, now we need the target user.
+        # Let's reuse the user selection popup logic.
+        box = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        box.add_widget(Label(text="Select a user to send the dropped file to:"))
+        popup = AnimatedPopup(title="Select User", content=box, size_hint=(0.6, 0.8))
+        
+        def user_selected_for_dropped_file(username, popup, instance):
+            popup.dismiss()
+            self.send_filepath(filepath, username)
+
+        for username in self.app.p2p_manager.peers.keys():
+            btn = Button(text=username)
+            btn.bind(on_press=partial(user_selected_for_dropped_file, username, popup))
+            box.add_widget(btn)
+        
+        popup.open()
+
     def send_filepath(self, filepath, target_username):
         if not filepath or not target_username:
             return

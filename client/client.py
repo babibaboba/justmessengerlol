@@ -3,15 +3,25 @@ import os
 import socket
 import uuid
 import threading
-import pyaudio
 import queue
 from datetime import datetime
 from functools import partial
 import regex
+import json
+import emoji
+from collections import defaultdict
+import bluetooth
+from pynput import keyboard
+from cryptography.fernet import Fernet
+import zstandard as zstd
+import msgpack
 
 # Kivy imports
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
+import asyncio
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaRelay, MediaPlayer, MediaRecorder
 from kivy.uix.label import Label
 from kivy.uix.button import Button
 from kivy.uix.textinput import TextInput
@@ -21,97 +31,564 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.spinner import Spinner
 from kivy.uix.slider import Slider
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelHeader
+from kivy.uix.switch import Switch
 from kivy.clock import mainthread, Clock
 from kivy.core.window import Window
 from kivy.graphics import Color, Rectangle
 from kivy.animation import Animation
 from kivy.core.audio import SoundLoader
 from kivy.core.text import LabelBase
+from kivy.metrics import dp
 
 # --- Set borderless before anything else ---
-Window.borderless = True
+Window.borderless = False
 Window.size = (1000, 600)
 
 # Project imports
 try:
-    from config_manager import ConfigManager
     from p2p_manager import P2PManager
-    from server_manager import ServerManager
-    from localization import Translator
     import stun
-    from hotkey_manager import HotkeyManager
-    from pynput import keyboard
-    from bluetooth_manager import BluetoothManager
-    from audio_recorder import AudioRecorder
-    from audio_manager import AudioManager
     from plugin_manager import PluginManager
-    from emoji_manager import EmojiManager
-except ImportError as e: print(f"Import Error: {e}"); sys.exit(1)
+    from translator import Translator
+except ImportError as e:
+    print(f"Import Error: {e}")
+    sys.exit(1)
 
 # --- Constants ---
-CHUNK = 1024
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
 
-# --- UI-Agnostic Threads ---
+# ------------------- Manager Classes -------------------
+class BluetoothManager:
+        def __init__(self, username, callback_queue):
+            self.username = username
+            self.callback_queue = callback_queue
+            self.server_sock = None
+            self.client_sock = None
+            self.running = False
+            self.server_thread = None
+            self.client_thread = None
+            self.uuid = "94f39d29-7d6d-437d-973b-fba39e49d4ee" # Unique UUID for this app
+    
+        def start(self):
+            self.running = True
+            self.server_thread = threading.Thread(target=self.run_server, daemon=True)
+            self.server_thread.start()
+            print("BluetoothManager server started.")
+    
+        def stop(self):
+            self.running = False
+            if self.server_sock:
+                self.server_sock.close()
+            if self.client_sock:
+                self.client_sock.close()
+            print("BluetoothManager stopped.")
+    
+        def discover_devices(self):
+            """Scans for nearby Bluetooth devices."""
+            print("Scanning for Bluetooth devices...")
+            try:
+                nearby_devices = bluetooth.discover_devices(duration=8, lookup_names=True, flush_cache=True, lookup_class=False)
+                self.callback_queue.put(('bt_devices_discovered', nearby_devices))
+                return nearby_devices
+            except Exception as e:
+                print(f"Error discovering devices: {e}")
+                self.callback_queue.put(('bt_discovery_error', str(e)))
+                return []
+    
+        def run_server(self):
+            """Listens for incoming Bluetooth connections."""
+            try:
+                self.server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+                self.server_sock.bind(("", bluetooth.PORT_ANY))
+                self.server_sock.listen(1)
+    
+                port = self.server_sock.getsockname()[1]
+    
+                bluetooth.advertise_service(self.server_sock, "VoiceChatApp",
+                                          service_id=self.uuid,
+                                          service_classes=[self.uuid, bluetooth.SERIAL_PORT_CLASS],
+                                          profiles=[bluetooth.SERIAL_PORT_PROFILE])
+                
+                print(f"Waiting for connection on RFCOMM channel {port}")
+                
+                while self.running:
+                    try:
+                        client_sock, client_info = self.server_sock.accept()
+                        self.callback_queue.put(('bt_connection_received', client_info))
+                        # Handle the connection in a new thread
+                        handler_thread = threading.Thread(target=self.handle_client, args=(client_sock,), daemon=True)
+                        handler_thread.start()
+                    except bluetooth.btcommon.BluetoothError:
+                        # This happens when the socket is closed
+                        break
+            except OSError as e:
+                # This specific error (10040 or similar) can happen if the BT adapter is off
+                print(f"Bluetooth server OS error: {e}")
+                self.callback_queue.put(('bt_adapter_error', 'Please ensure your Bluetooth adapter is turned on.'))
+            except Exception as e:
+                print(f"Bluetooth server error: {e}")
+                self.callback_queue.put(('bt_server_error', str(e)))
+    
+        def handle_client(self, sock):
+            """Handles an incoming client connection."""
+            try:
+                while self.running:
+                    data = sock.recv(1024)
+                    if not data:
+                        break
+                    message = data.decode('utf-8')
+                    self.callback_queue.put(('bt_message_received', message))
+            except Exception as e:
+                print(f"Error handling BT client: {e}")
+            finally:
+                sock.close()
+    
+        def connect_to_device(self, addr):
+            """Connects to a specific Bluetooth device."""
+            print(f"Connecting to {addr}...")
+            try:
+                service_matches = bluetooth.find_service(uuid=self.uuid, address=addr)
+    
+                if len(service_matches) == 0:
+                    self.callback_queue.put(('bt_connection_failed', "Service not found."))
+                    return
+    
+                first_match = service_matches[0]
+                port = first_match["port"]
+                name = first_match["name"]
+                host = first_match["host"]
+    
+                sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+                sock.connect((host, port))
+                
+                self.client_sock = sock
+                self.callback_queue.put(('bt_connection_successful', name))
+                
+                # Start a thread to listen for messages from this connection
+                self.client_thread = threading.Thread(target=self.listen_for_messages, daemon=True)
+                self.client_thread.start()
+    
+            except Exception as e:
+                print(f"Error connecting to device: {e}")
+                self.callback_queue.put(('bt_connection_failed', str(e)))
+    
+        def listen_for_messages(self):
+            """Listens for messages on the client socket."""
+            try:
+                while self.running and self.client_sock:
+                    data = self.client_sock.recv(1024)
+                    if not data:
+                        break
+                    message = data.decode('utf-8')
+                    self.callback_queue.put(('bt_message_received', message))
+            except Exception as e:
+                print(f"Error in client listening thread: {e}")
+            finally:
+                if self.client_sock:
+                    self.client_sock.close()
+                    self.client_sock = None
+                self.callback_queue.put(('bt_disconnected', None))
+    
+    
+        def send_message(self, message):
+            """Sends a message to the connected device."""
+            if self.client_sock:
+                try:
+                    self.client_sock.send(message.encode('utf-8'))
+                    return True
+                except Exception as e:
+                    print(f"Error sending BT message: {e}")
+                    return False
+            return False
+    
+class EmojiManager:
+    def __init__(self):
+        self.categorized_emojis = self._get_windows_emojis()
 
-class AudioThread(threading.Thread):
-    def __init__(self, udp_socket, peer_addr, sample_rate, input_device_index=None, output_device_index=None):
+    def _get_windows_emojis(self):
+        """Generates a categorized dictionary of emojis using Windows Unicode ranges."""
+        # These are common Unicode blocks for emojis.
+        # It's not a perfect categorization, but it's robust and doesn't rely on external libraries.
+        categories = {
+            'Smileys & People': list(range(0x1F600, 0x1F650)),
+            'Symbols & Pictographs': list(range(0x1F300, 0x1F600)),
+            'Transport & Map': list(range(0x1F680, 0x1F700)),
+            'Dingbats': list(range(0x2700, 0x27C0)),
+            'Misc Symbols': list(range(0x2600, 0x2700)),
+        }
+        
+        # Convert integer code points to characters
+        char_categories = {}
+        for category, code_points in categories.items():
+            char_categories[category] = [chr(cp) for cp in code_points]
+            
+        return char_categories
+
+    def get_categorized_emojis(self):
+        """Returns a dictionary of emojis grouped by category."""
+        return self.categorized_emojis
+    
+    
+class HotkeyManager(threading.Thread):
+    def __init__(self):
         super().__init__(daemon=True)
-        self.udp_socket = udp_socket
-        self.peer_addr = peer_addr
-        self.rate = sample_rate
+        self.hotkey = None
+        self.callback = None
         self.running = True
-        self.muted = False
-        self.audio = pyaudio.PyAudio()
-        
-        self.output_stream = self.audio.open(format=FORMAT, channels=CHANNELS,
-                                             rate=self.rate, output=True,
-                                             frames_per_buffer=CHUNK,
-                                             output_device_index=output_device_index)
-        
-        self.input_stream = self.audio.open(format=FORMAT, channels=CHANNELS,
-                                            rate=self.rate, input=True,
-                                            frames_per_buffer=CHUNK,
-                                            input_device_index=input_device_index)
+        self.listener = None
+
+    def set_hotkey(self, key_combination):
+        """
+        Sets the hotkey to listen for.
+        key_combination should be a set of pynput.keyboard.Key or pynput.keyboard.KeyCode
+        e.g., {keyboard.Key.ctrl, keyboard.KeyCode.from_char('m')}
+        """
+        self.hotkey = key_combination
+
+    def register_callback(self, func):
+        self.callback = func
 
     def run(self):
-        send_thread = threading.Thread(target=self.send_audio, daemon=True)
-        receive_thread = threading.Thread(target=self.receive_audio, daemon=True)
-        send_thread.start()
-        receive_thread.start()
-        send_thread.join()
-        receive_thread.join()
+        # A set of currently pressed keys
+        current_keys = set()
 
-    def send_audio(self):
-        while self.running:
+        def on_press(key):
+            if self.hotkey and key in self.hotkey:
+                current_keys.add(key)
+                if all(k in current_keys for k in self.hotkey):
+                    if self.callback:
+                        self.callback()
+            
+        def on_release(key):
             try:
-                data = self.input_stream.read(CHUNK, exception_on_overflow=False)
-                if self.muted:
-                    data = b'\x00' * len(data)
-                self.udp_socket.sendto(data, self.peer_addr)
-            except (IOError, OSError):
-                break
+                current_keys.remove(key)
+            except KeyError:
+                pass # Key was not in the set
 
-    def receive_audio(self):
-        while self.running:
-            try:
-                data, addr = self.udp_socket.recvfrom(CHUNK * 2)
-                self.output_stream.write(data)
-            except (IOError, OSError):
-                break
+        # Collect events until released
+        with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+            self.listener = listener
+            listener.join()
+
+    def stop(self):
+        if self.listener:
+            self.listener.stop()
+
+
+class WebRTCManager(threading.Thread):
+    def __init__(self, callback_queue):
+        super().__init__(daemon=True)
+        self.callback_queue = callback_queue
+        self.loop = None
+        self.peer_connections = {} # {peer_username: RTCPeerConnection}
+        self.audio_sender = {} # {peer_username: sender_track}
+        self.running = True
+
+    def run(self):
+        """Runs the asyncio event loop in this dedicated thread."""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_forever()
+        finally:
+            self.loop.close()
 
     def stop(self):
         self.running = False
-        self.input_stream.stop_stream()
-        self.input_stream.close()
-        self.output_stream.stop_stream()
-        self.output_stream.close()
-        self.audio.terminate()
-        print("AudioThread stopped.")
+        if self.loop:
+            self.loop.call_soon_threadsafe(self.loop.stop)
 
-    def set_muted(self, muted):
-        self.muted = muted
+    # --- Public methods to be called from other threads ---
+    
+    async def _create_peer_connection(self, peer_username):
+        """Coroutine to create and configure a peer connection."""
+        pc = RTCPeerConnection()
+        self.peer_connections[peer_username] = pc
+
+        @pc.on("track")
+        async def on_track(track):
+            print(f"Track {track.kind} received from {peer_username}")
+            # Here we would play the audio. This needs a player implementation.
+            if track.kind == "audio":
+                # Kivy cannot play raw audio frames directly. We need a way to buffer
+                # and play this. This is a complex part of the integration.
+                self.callback_queue.put(('webrtc_audio_received', {'peer': peer_username, 'track': track}))
+
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            print(f"Connection state for {peer_username} is {pc.connectionState}")
+            if pc.connectionState == "failed":
+                await pc.close()
+                del self.peer_connections[peer_username]
+
+        return pc
+
+    def start_call(self, peer_username):
+        """Initiates a call to a peer."""
+        if not self.loop: return
+        future = asyncio.run_coroutine_threadsafe(self._start_call(peer_username), self.loop)
+        return future.result()
+
+    async def _start_call(self, peer_username):
+        pc = await self._create_peer_connection(peer_username)
+        
+        # Add local audio track
+        # This is a placeholder for getting microphone audio.
+        # It will be implemented properly later.
+        
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        
+        # The offer needs to be sent to the peer via the signaling channel (our P2PManager)
+        sdp_offer = {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        self.callback_queue.put(('webrtc_offer_created', {'peer': peer_username, 'offer': sdp_offer}))
+
+    def handle_offer(self, peer_username, offer_sdp):
+        """Handles an incoming offer from a peer."""
+        if not self.loop: return
+        future = asyncio.run_coroutine_threadsafe(self._handle_offer(peer_username, offer_sdp), self.loop)
+        return future.result()
+
+    async def _handle_offer(self, peer_username, offer_sdp):
+        pc = await self._create_peer_connection(peer_username)
+        
+        offer = RTCSessionDescription(sdp=offer_sdp["sdp"], type=offer_sdp["type"])
+        await pc.setRemoteDescription(offer)
+        
+        # Add local audio track (placeholder)
+        
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        
+        sdp_answer = {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        self.callback_queue.put(('webrtc_answer_created', {'peer': peer_username, 'answer': sdp_answer}))
+        
+    def handle_answer(self, peer_username, answer_sdp):
+        if not self.loop: return
+        asyncio.run_coroutine_threadsafe(self._handle_answer(peer_username, answer_sdp), self.loop)
+        
+    async def _handle_answer(self, peer_username, answer_sdp):
+        pc = self.peer_connections.get(peer_username)
+        if pc:
+            answer = RTCSessionDescription(sdp=answer_sdp["sdp"], type=answer_sdp["type"])
+            await pc.setRemoteDescription(answer)
+
+    async def _close_peer_connection(self, peer_username):
+        if peer_username in self.peer_connections:
+            pc = self.peer_connections[peer_username]
+            await pc.close()
+            del self.peer_connections[peer_username]
+            
+    def end_call(self, peer_username):
+        if not self.loop: return
+        asyncio.run_coroutine_threadsafe(self._close_peer_connection(peer_username), self.loop)
+    
+class ConfigManager:
+    def __init__(self, key_path='secret.key', config_path='config.dat'):
+        self.key_path = key_path
+        self.config_path = config_path
+        self.key = self.load_or_generate_key()
+        self.cipher = Fernet(self.key)
+
+    def load_or_generate_key(self):
+        """Загружает ключ шифрования или генерирует новый, если он не найден."""
+        if os.path.exists(self.key_path):
+            with open(self.key_path, 'rb') as f:
+                return f.read()
+        else:
+            key = Fernet.generate_key()
+            with open(self.key_path, 'wb') as f:
+                f.write(key)
+            return key
+
+    def save_config(self, config_data):
+        """Шифрует и сохраняет данные конфигурации."""
+        try:
+            # Сериализуем словарь в JSON-строку, затем в байты
+            data_bytes = json.dumps(config_data).encode('utf-8')
+            encrypted_data = self.cipher.encrypt(data_bytes)
+            with open(self.config_path, 'wb') as f:
+                f.write(encrypted_data)
+            return True
+        except Exception as e:
+            print(f"Ошибка при сохранении конфигурации: {e}")
+            return False
+
+    def load_config(self):
+        """Загружает и расшифровывает данные конфигурации."""
+        if not os.path.exists(self.config_path):
+            return {}  # Возвращаем пустой словарь, если конфига нет
+
+        try:
+            with open(self.config_path, 'rb') as f:
+                encrypted_data = f.read()
+            
+            decrypted_data_bytes = self.cipher.decrypt(encrypted_data)
+            # Десериализуем из байтов в JSON-строку, затем в словарь
+            config_data = json.loads(decrypted_data_bytes.decode('utf-8'))
+            return config_data
+        except Exception as e:
+            print(f"Ошибка при загрузке или расшифровке конфигурации: {e}")
+            # Если расшифровка не удалась (например, ключ изменился), возвращаем пустой конфиг
+            return {}
+    
+class ServerManager(threading.Thread):
+    def __init__(self, host, port, username, password, chat_history):
+        super().__init__(daemon=True)
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.chat_history = chat_history # Reference to the main app's history
+        self.sock = None
+        self.running = True
+        self.callbacks = {}
+        self.zstd_c = zstd.ZstdCompressor()
+        self.zstd_d = zstd.ZstdDecompressor()
+
+    def register_callback(self, event_name, func):
+        self.callbacks[event_name] = func
+
+    def _trigger_callback(self, event_name, *args):
+        if event_name in self.callbacks:
+            self.callbacks[event_name](*args)
+
+    def run(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((self.host, self.port))
+            self.login()
+            self.listen_for_messages()
+        except Exception as e:
+            print(f"ServerManager Error: {e}")
+            self._trigger_callback('connection_failed', str(e))
+        finally:
+            if self.sock:
+                self.sock.close()
+
+    def listen_for_messages(self):
+        unpacker = msgpack.Unpacker(raw=False)
+        while self.running:
+            try:
+                data = self.sock.recv(4096)
+                if not data:
+                    break
+                
+                # Decompress the received chunk immediately
+                try:
+                    decompressed_data = self.zstd_d.decompress(data)
+                    unpacker.feed(decompressed_data)
+                    for unpacked in unpacker:
+                        self.handle_command(unpacked)
+                except zstd.ZstdError:
+                    # This might happen if we receive a partial compressed frame.
+                    # A more robust solution would buffer compressed chunks.
+                    # For now, we assume each recv() gets at least one full message.
+                    print("Warning: Could not decompress chunk, might be partial.")
+                    continue
+
+            except (ConnectionResetError, ConnectionAbortedError):
+                print("Connection to server lost.")
+                break
+            except Exception as e:
+                print(f"Error receiving data from server: {e}")
+                break
+        self._trigger_callback('disconnected')
+
+    def _send_command(self, command, payload=None):
+        if not self.sock:
+            return
+        try:
+            message = {'command': command, 'payload': payload or {}}
+            packed_message = msgpack.packb(message, use_bin_type=True)
+            compressed_message = self.zstd_c.compress(packed_message)
+            self.sock.sendall(compressed_message)
+        except Exception as e:
+            print(f"Error sending command '{command}': {e}")
+
+    def handle_command(self, message):
+        try:
+            command = message.get('command')
+            payload = message.get('payload')
+
+            if command == 'login_success':
+                # We don't really need to do anything here, but it's good to have.
+                pass
+            elif command == 'login_failed':
+                self._trigger_callback('login_failed', payload)
+            elif command == 'info':
+                self._trigger_callback('info_received', payload)
+            elif command == 'user_list_update':
+                self._trigger_callback('user_list_update', payload.get('users'))
+            elif command == 'group_message':
+                self._trigger_callback('group_message_received', payload.get('group_id'), payload.get('message_data'))
+            elif command == 'group_created':
+                 self._trigger_callback('group_created', payload.get('group_id'), payload.get('group_name'), payload.get('admin'))
+            elif command == 'group_invite':
+                self._trigger_callback('incoming_group_invite', payload.get('group_id'), payload.get('group_name'), payload.get('admin'))
+            elif command == 'group_invite_response':
+                 self._trigger_callback('group_invite_response', payload.get('group_id'), payload.get('username'), payload.get('accepted'))
+            elif command == 'user_joined_group':
+                self._trigger_callback('group_joined', payload.get('group_id'), payload.get('username'))
+            elif command == 'history_response':
+                self._trigger_callback('history_received', payload.get('chat_id'), payload.get('history'))
+            elif command == 'initial_data':
+                self._trigger_callback('initial_data_received', payload.get('groups'), payload.get('users'))
+            elif command == 'incoming_group_call':
+                self._trigger_callback('incoming_group_call', payload.get('group_id'), payload.get('admin'), payload.get('sample_rate'))
+            elif command == 'user_joined_call':
+                self._trigger_callback('user_joined_call', payload.get('group_id'), payload.get('username'))
+            elif command == 'user_left_call':
+                self._trigger_callback('user_left_call', payload.get('group_id'), payload.get('username'))
+            elif command == 'user_kicked':
+                self._trigger_callback('user_kicked', payload.get('group_id'), payload.get('kicked_user'), payload.get('admin'))
+
+
+        except Exception as e:
+            print(f"Error handling server command: {e} - Message: {message}")
+
+    def login(self):
+        self._send_command('login', {'username': self.username, 'password': self.password})
+
+    def send_group_message(self, group_id, message_data):
+        self._send_command('group_message', {'group_id': group_id, 'message_data': message_data})
+
+    def create_group(self, group_name):
+        self._send_command('create_group', {'group_name': group_name})
+
+    def invite_to_group(self, group_id, target_username):
+        self._send_command('invite_to_group', {'group_id': group_id, 'username': target_username})
+
+    def send_group_invite_response(self, group_id, accepted):
+        self._send_command('group_invite_response', {'group_id': group_id, 'accepted': accepted})
+        
+    def request_history(self, chat_id):
+        self._send_command('request_history', {'chat_id': chat_id})
+
+    def start_group_call(self, group_id, sample_rate):
+        self._send_command('start_group_call', {'group_id': group_id, 'sample_rate': sample_rate})
+
+    def join_group_call(self, group_id, udp_addr):
+        self._send_command('join_group_call', {'group_id': group_id, 'udp_addr': udp_addr})
+
+    def leave_group_call(self, group_id):
+        self._send_command('leave_group_call', {'group_id': group_id})
+
+    def kick_user_from_group(self, group_id, username):
+        self._send_command('kick_from_group', {'group_id': group_id, 'username': username})
+
+    def stop(self):
+        self.running = False
+        if self.sock:
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+                self.sock.close()
+            except OSError:
+                pass
+        print("ServerManager stopped.")
+    
+    
+# --- UI-Agnostic Threads ---
+
 
 
 # --- Kivy Popups & Widgets ---
@@ -123,32 +600,6 @@ class AnimatedPopup(Popup):
         super().open(*args, **kwargs)
         anim = Animation(scale=1, opacity=1, d=0.2, t='out_quad')
         anim.start(self)
-
-class TitleBar(BoxLayout):
-    def on_touch_move(self, touch):
-        if touch.grab_current is self:
-            Window.left = self._start_x + (touch.x - self._touch_x)
-            Window.top = self._start_y - (touch.y - self._touch_y)
-        return super().on_touch_move(touch)
-
-    def on_touch_down(self, touch):
-        if self.collide_point(*touch.pos):
-            for child in self.children:
-                if isinstance(child, Button) and child.collide_point(*touch.pos):
-                    return super().on_touch_down(touch)
-            touch.grab(self)
-            self._start_x = Window.left
-            self._start_y = Window.top
-            self._touch_x = touch.x
-            self._touch_y = touch.y
-            return True
-        return super().on_touch_down(touch)
-
-    def on_touch_up(self, touch):
-        if touch.grab_current is self:
-            touch.ungrab(self)
-            return True
-        return super().on_touch_up(touch)
 
 class RootLayout(BoxLayout): pass
 class ChatLayout(BoxLayout): pass
@@ -219,53 +670,8 @@ class ContactRequestPopup(AnimatedPopup):
     def on_response(self, accepted):
         pass
 
-class EmojiPopup(AnimatedPopup):
-    def __init__(self, translator, emoji_manager, **kwargs):
-        super().__init__(**kwargs)
-        self.tr = translator
-        self.emoji_manager = emoji_manager
-        self.title = self.tr.get('emoji_popup_title', 'Select Emoji')
-        self.size_hint = (0.9, 0.8)
-
-        # Main layout with TabbedPanel
-        main_layout = BoxLayout(orientation='vertical')
-        tab_panel = TabbedPanel(do_default_tab=False, tab_pos='top_left')
-
-        # Get categorized emojis
-        categorized_emojis = self.emoji_manager.get_categorized_emojis()
-
-        for category, emojis in categorized_emojis.items():
-            # Create a tab for each category
-            tab = TabbedPanelHeader(text=category)
-            
-            # Scrollable grid for emojis in the tab
-            scroll_view = ScrollView()
-            grid = GridLayout(cols=8, spacing=5, size_hint_y=None)
-            grid.bind(minimum_height=grid.setter('height'))
-            
-            for emoji in emojis:
-                btn = Button(
-                    text=emoji,
-                    font_name='EmojiFont', # Use the registered font
-                    font_size='24sp'
-                )
-                btn.bind(on_press=self.select_emoji)
-                grid.add_widget(btn)
-            
-            scroll_view.add_widget(grid)
-            tab.content = scroll_view
-            tab_panel.add_widget(tab)
-
-        main_layout.add_widget(tab_panel)
-        self.content = main_layout
-        self.register_event_type('on_select')
-
-    def select_emoji(self, instance):
-        self.dispatch('on_select', instance.text)
-        self.dismiss()
-
-    def on_select(self, emoji):
-        pass
+# The EmojiPopup class is no longer needed and will be removed.
+# The functionality will be integrated into the main app class.
 
 class GroupCallPopup(AnimatedPopup):
     # Placeholder for now
@@ -455,23 +861,19 @@ class ServerLoginPopup(AnimatedPopup):
             pass
 
 class SettingsPopup(AnimatedPopup):
-    def __init__(self, translator, config, audio_manager, **kwargs):
+    def __init__(self, translator, config, app, **kwargs):
         super().__init__(**kwargs)
-        if not audio_manager:
-            raise ValueError("SettingsPopup requires a valid AudioManager instance.")
+        self.app = app # Store the app instance
         self.tr = translator
         self.config = config
-        self.audio_manager = audio_manager
         self.title = self.tr.get('settings_title', 'Settings')
         self.size_hint = (0.8, 0.9)
         self.auto_dismiss = False
         self.new_hotkey = set()
         self.recording = False
-        self.audio_devices = self.audio_manager.get_audio_devices()
         self.listener = None
         self.is_testing = False
         self.test_sound = None
-        self.p_audio = pyaudio.PyAudio() # Create a shared PyAudio instance
 
         # --- Main Layout ---
         main_layout = BoxLayout(orientation='vertical', spacing=5, padding=10)
@@ -479,11 +881,6 @@ class SettingsPopup(AnimatedPopup):
         # --- Tabbed Panel for Settings ---
         tab_panel = TabbedPanel(do_default_tab=False)
         
-        # --- Audio Tab ---
-        audio_tab = TabbedPanelHeader(text=self.tr.get('audio_tab', 'Audio'))
-        audio_tab.content = self.create_audio_tab()
-        tab_panel.add_widget(audio_tab)
-
         # --- Hotkeys Tab ---
         hotkeys_tab = TabbedPanelHeader(text=self.tr.get('hotkeys_tab', 'Hotkeys'))
         hotkeys_tab.content = self.create_hotkeys_tab()
@@ -493,6 +890,11 @@ class SettingsPopup(AnimatedPopup):
         security_tab = TabbedPanelHeader(text=self.tr.get('security_tab', 'Security'))
         security_tab.content = self.create_security_tab()
         tab_panel.add_widget(security_tab)
+
+        # --- Plugins Tab ---
+        plugins_tab = TabbedPanelHeader(text=self.tr.get('plugins_tab', 'Plugins'))
+        plugins_tab.content = self.create_plugins_tab()
+        tab_panel.add_widget(plugins_tab)
 
         main_layout.add_widget(tab_panel)
 
@@ -507,38 +909,6 @@ class SettingsPopup(AnimatedPopup):
         main_layout.add_widget(btn_layout)
         
         self.content = main_layout
-
-    def create_audio_tab(self):
-        layout = BoxLayout(orientation='vertical', spacing=5, padding=10)
-        # Input device
-        layout.add_widget(Label(text=self.tr.get('input_device_label', 'Input Device:'), size_hint_y=None, height=30))
-        input_layout = BoxLayout(size_hint_y=None, height=44)
-        input_devices = [f"{d['name']} (API: {d['hostApiName']})" for d in self.audio_devices['input']]
-        self.input_spinner = Spinner(text=self.get_device_name('input'), values=input_devices)
-        self.input_spinner.bind(text=self.on_input_device_change)
-        test_mic_btn = Button(text=self.tr.get('test_mic_button', 'Test'), size_hint_x=0.2)
-        test_mic_btn.bind(on_press=self.test_input_device)
-        input_layout.add_widget(self.input_spinner)
-        input_layout.add_widget(test_mic_btn)
-        layout.add_widget(input_layout)
-        self.input_volume_slider = Slider(min=0, max=100, value=self.get_current_volume('input'), size_hint_y=None, height=44)
-        self.input_volume_slider.bind(value=self.on_input_volume_change)
-        layout.add_widget(self.input_volume_slider)
-        # Output device
-        layout.add_widget(Label(text=self.tr.get('output_device_label', 'Output Device:'), size_hint_y=None, height=30))
-        output_layout = BoxLayout(size_hint_y=None, height=44)
-        output_devices = [f"{d['name']} (API: {d['hostApiName']})" for d in self.audio_devices['output']]
-        self.output_spinner = Spinner(text=self.get_device_name('output'), values=output_devices)
-        self.output_spinner.bind(text=self.on_output_device_change)
-        test_speaker_btn = Button(text=self.tr.get('test_speaker_button', 'Test'), size_hint_x=0.2)
-        test_speaker_btn.bind(on_press=self.test_output_device)
-        output_layout.add_widget(self.output_spinner)
-        output_layout.add_widget(test_speaker_btn)
-        layout.add_widget(output_layout)
-        self.output_volume_slider = Slider(min=0, max=100, value=self.get_current_volume('output'), size_hint_y=None, height=44)
-        self.output_volume_slider.bind(value=self.on_output_volume_change)
-        layout.add_widget(self.output_volume_slider)
-        return layout
 
     def create_hotkeys_tab(self):
         layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
@@ -564,107 +934,34 @@ class SettingsPopup(AnimatedPopup):
         layout.add_widget(self.p2p_password_input)
         return layout
 
-    def test_input_device(self, instance):
-        if self.is_testing:
-            return
-        self.is_testing = True
-        instance.disabled = True
-        instance.text = self.tr.get('testing_button', 'Testing...')
-        
-        input_device_index = self._get_selected_device_index('input')
-        output_device_index = self._get_selected_device_index('output')
+    def create_plugins_tab(self):
+        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        scroll_view = ScrollView()
+        scroll_content = GridLayout(cols=1, size_hint_y=None, spacing=10)
+        scroll_content.bind(minimum_height=scroll_content.setter('height'))
 
-        def test_mic_thread_inner():
-            try:
-                stream_in = self.p_audio.open(format=pyaudio.paInt16, channels=1, rate=44100,
-                                     input=True, frames_per_buffer=CHUNK,
-                                     input_device_index=input_device_index)
-                frames = []
-                for _ in range(0, int(44100 / CHUNK * 2)): # 2 seconds
-                    data = stream_in.read(CHUNK, exception_on_overflow=False)
-                    frames.append(data)
-                stream_in.stop_stream()
-                stream_in.close()
+        self.plugin_switches = {} # To hold references to the switches
+
+        if self.app.plugin_manager and self.app.plugin_manager.plugins:
+            for plugin in self.app.plugin_manager.plugins:
+                plugin_layout = BoxLayout(size_hint_y=None, height=60)
                 
-                stream_out = self.p_audio.open(format=pyaudio.paInt16, channels=1, rate=44100,
-                                      output=True, frames_per_buffer=CHUNK,
-                                      output_device_index=output_device_index)
-                for data in frames:
-                    stream_out.write(data)
-                stream_out.stop_stream()
-                stream_out.close()
-            except Exception as e:
-                print(f"Mic test error: {e}")
-                pass
-            finally:
-                Clock.schedule_once(lambda dt: self.reset_test_button_state(instance, 'test_mic_button'), 0)
+                info_layout = BoxLayout(orientation='vertical')
+                info_layout.add_widget(Label(text=plugin['name'], font_size='16sp', halign='left', valign='top'))
+                info_layout.add_widget(Label(text=plugin['description'], font_size='12sp', color=(0.7,0.7,0.7,1), halign='left', valign='top'))
+                
+                switch = Switch(active=plugin['enabled'])
+                self.plugin_switches[plugin['id']] = switch
 
-        threading.Thread(target=test_mic_thread_inner, daemon=True).start()
+                plugin_layout.add_widget(info_layout)
+                plugin_layout.add_widget(switch)
+                scroll_content.add_widget(plugin_layout)
+        else:
+            scroll_content.add_widget(Label(text=self.tr.get('no_plugins_found', 'No plugins found.')))
 
-    def test_output_device(self, instance):
-        if self.is_testing:
-            return
-        
-        self.is_testing = True
-        instance.disabled = True
-        instance.text = self.tr.get('testing_button', 'Testing...')
-
-        output_device_index = self._get_selected_device_index('output')
-        
-        if self.test_sound and self.test_sound.state == 'play':
-            self.test_sound.stop()
-
-        import wave
-        import numpy as np
-        import io
-
-        sample_rate = 44100
-        duration = 1 # seconds
-        frequency = 440 # A4
-        volume = 0.5
-        
-        t = np.linspace(0., duration, int(sample_rate * duration), endpoint=False)
-        amplitude = np.iinfo(np.int16).max * volume
-        data = amplitude * np.sin(2. * np.pi * frequency * t)
-
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2) # 16-bit
-            wf.setframerate(sample_rate)
-            wf.writeframes(data.astype(np.int16).tobytes())
-        
-        wav_buffer.seek(0)
-
-        def test_speaker_thread_inner():
-            try:
-                with wave.open(wav_buffer, 'rb') as wf:
-                    stream = self.p_audio.open(format=self.p_audio.get_format_from_width(wf.getsampwidth()),
-                                    channels=wf.getnchannels(),
-                                    rate=wf.getframerate(),
-                                    output=True,
-                                    output_device_index=output_device_index)
-                    
-                    data = wf.readframes(CHUNK)
-                    while data:
-                        stream.write(data)
-                        data = wf.readframes(CHUNK)
-
-                    stream.stop_stream()
-                    stream.close()
-            except Exception as e:
-                print(f"Speaker test error: {e}")
-                pass
-            finally:
-                Clock.schedule_once(lambda dt: self.reset_test_button_state(instance, 'test_speaker_button'), 0)
-
-        threading.Thread(target=test_speaker_thread_inner, daemon=True).start()
-
-    @mainthread
-    def reset_test_button_state(self, instance, button_key):
-        instance.disabled = False
-        instance.text = self.tr.get(button_key, 'Test')
-        self.is_testing = False
+        scroll_view.add_widget(scroll_content)
+        layout.add_widget(scroll_view)
+        return layout
 
     def toggle_record(self, instance):
         self.recording = not self.recording
@@ -696,62 +993,51 @@ class SettingsPopup(AnimatedPopup):
             self.listener.stop()
             self.listener = None
 
-    def get_audio_devices(self):
-        p = pyaudio.PyAudio()
-        devices = {'input': [], 'output': []}
-        for i in range(p.get_device_count()):
-            dev_info = p.get_device_info_by_index(i)
-            if dev_info.get('maxInputChannels') > 0:
-                devices['input'].append({
-                    'index': i,
-                    'name': dev_info.get('name'),
-                    'hostApiName': p.get_host_api_info_by_index(dev_info.get('hostApi')).get('name')
-                })
-            if dev_info.get('maxOutputChannels') > 0:
-                devices['output'].append({
-                    'index': i,
-                    'name': dev_info.get('name'),
-                    'hostApiName': p.get_host_api_info_by_index(dev_info.get('hostApi')).get('name')
-                })
-        p.terminate()
-        return devices
-
-    def get_device_name(self, device_type):
-        """Get the currently configured device name."""
-        device_index = self.config.get(f'{device_type}_device_index')
-        if device_index is not None:
-            for dev in self.audio_devices[device_type]:
-                if dev['index'] == device_index:
-                    return f"{dev['name']} (API: {dev['hostApiName']})"
-        return self.tr.get('default_device', 'Default Device')
-
-    def _get_selected_device_index(self, device_type):
-        spinner = self.input_spinner if device_type == 'input' else self.output_spinner
-        selected_text = spinner.text
-        for dev in self.audio_devices[device_type]:
-            if f"{dev['name']} (API: {dev['hostApiName']})" == selected_text:
-                return dev['index']
-        return None
-
     def save_and_dismiss(self, instance):
         self.stop_listener()
         self.hotkey = self.new_hotkey
         
-        self.config['input_device_index'] = self._get_selected_device_index('input')
-        self.config['output_device_index'] = self._get_selected_device_index('output')
-        self.config['input_volume'] = int(self.input_volume_slider.value)
-        self.config['output_volume'] = int(self.output_volume_slider.value)
-        
         if 'security' not in self.config:
             self.config['security'] = {}
         self.config['security']['p2p_password'] = self.p2p_password_input.text
+
+        # --- Handle Plugin Enable/Disable ---
+        restart_required = False
+        if hasattr(self, 'plugin_switches'):
+            for plugin in self.app.plugin_manager.plugins:
+                plugin_id = plugin['id']
+                switch = self.plugin_switches.get(plugin_id)
+                if switch is None:
+                    continue
+
+                is_currently_enabled = plugin['enabled']
+                should_be_enabled = switch.active
+
+                if is_currently_enabled != should_be_enabled:
+                    restart_required = True
+                    py_file_path = os.path.join(plugin['path'], f"{plugin['module_name']}.py")
+                    disabled_py_file_path = py_file_path + '.disabled'
+
+                    try:
+                        if should_be_enabled and os.path.exists(disabled_py_file_path):
+                            os.rename(disabled_py_file_path, py_file_path)
+                            print(f"Enabled plugin: {plugin['name']}")
+                        elif not should_be_enabled and os.path.exists(py_file_path):
+                            os.rename(py_file_path, disabled_py_file_path)
+                            print(f"Disabled plugin: {plugin['name']}")
+                    except Exception as e:
+                        print(f"Error changing plugin state for {plugin['name']}: {e}")
+
+        if restart_required:
+            self.app.show_popup(
+                self.tr.get('restart_required_title', 'Restart Required'),
+                self.tr.get('restart_required_message', 'Plugin changes will take effect after restarting the application.')
+            )
         
-        self.p_audio.terminate()
         self.dismiss()
 
     def cancel_and_dismiss(self, instance):
         self.stop_listener()
-        self.p_audio.terminate()
         self.dismiss()
 
     @staticmethod
@@ -762,43 +1048,30 @@ class SettingsPopup(AnimatedPopup):
             return key.char
         return str(key)
 
-    def on_input_device_change(self, spinner, text):
-        self.input_volume_slider.value = self.get_current_volume('input')
-
-    def on_output_device_change(self, spinner, text):
-        self.output_volume_slider.value = self.get_current_volume('output')
-
-    def on_input_volume_change(self, slider, value):
-        device_index = self._get_selected_device_index('input')
-        if device_index is not None:
-            self.audio_manager.set_volume(device_index, 'input', int(value))
-
-    def on_output_volume_change(self, slider, value):
-        device_index = self._get_selected_device_index('output')
-        if device_index is not None:
-            self.audio_manager.set_volume(device_index, 'output', int(value))
-
-    def get_current_volume(self, device_type):
-        device_index = self._get_selected_device_index(device_type)
-        volume = None
-        
-        if device_index is not None and self.audio_manager:
-            volume = self.audio_manager.get_volume(device_index, device_type)
-        
-        if volume is not None:
-            return int(volume)
-            
-        config_volume = self.config.get(f'{device_type}_volume')
-        if config_volume is not None:
-            return int(config_volume)
-            
-        return 100
 
 
 class VoiceChatApp(App):
     def build(self):
         # Register emoji font
-        LabelBase.register(name='EmojiFont', fn_regular='C:/Windows/Fonts/seguiemj.ttf')
+        # Let's try to find a suitable emoji font
+        font_paths = [
+            'C:/Windows/Fonts/seguiemj.ttf',
+            '/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf', # Linux
+            '/System/Library/Fonts/Apple Color Emoji.ttc' # macOS
+        ]
+        found_font = None
+        for font in font_paths:
+            if os.path.exists(font):
+                found_font = font
+                break
+        
+        if found_font:
+            print(f"Emoji font found at: {found_font}")
+            LabelBase.register(name='EmojiFont', fn_regular=found_font)
+        else:
+            print("WARNING: No system emoji font found. Emojis will likely not render.")
+            # Using a basic font as a fallback.
+            LabelBase.register(name='EmojiFont', fn_regular='Roboto')
         return RootLayout()
 
     def on_start(self):
@@ -810,8 +1083,6 @@ class VoiceChatApp(App):
         self.username = None
         self.mode = None
         self.server_groups = {} # {group_id: {name, admin, members}}
-        self.p2p_audio_thread = None # For 1-on-1 calls
-        self.audio_threads = {} # For group calls {username: AudioThread}
         self.active_group_call = None # Stores group_id of the active call
         self.pending_group_call_punches = set()
         self.call_popup = None
@@ -820,15 +1091,15 @@ class VoiceChatApp(App):
         self.pending_call_target = None
         self.negotiated_rate = None
         self.callback_queue = queue.Queue()
+        self.webrtc_manager = WebRTCManager(self.callback_queue)
         self.hotkey_manager = HotkeyManager()
         self.is_muted = False
-        self.audio_recorder = None
-        self.audio_manager = None
         self.plugin_manager = None
         self.emoji_manager = None
         self.root.opacity = 0
         self.contacts = set() # Users who have accepted contact requests
         self.search_user_input = None
+        self.settings_popup = None
         
         self.chat_history = {'global': []}
         self.initialized = False
@@ -841,6 +1112,7 @@ class VoiceChatApp(App):
         self.current_theme = 'light'
 
         Clock.schedule_interval(self.process_callbacks, 0.1)
+        Window.bind(on_request_close=self.on_request_close, on_dropfile=self.on_file_drop)
         self.show_mode_selection_popup()
 
     def process_callbacks(self, dt):
@@ -863,6 +1135,10 @@ class VoiceChatApp(App):
                 elif event_type == 'bt_adapter_error':
                     _, error_msg = event
                     self.show_popup("Bluetooth Error", error_msg)
+                elif event_type == 'webrtc_offer_created':
+                    self.p2p_manager.send_webrtc_signal(event[1]['peer'], 'offer', event[1]['offer'])
+                elif event_type == 'webrtc_answer_created':
+                    self.p2p_manager.send_webrtc_signal(event[1]['peer'], 'answer', event[1]['answer'])
 
             except queue.Empty:
                 break
@@ -930,13 +1206,11 @@ class VoiceChatApp(App):
             return
         self.initialized = True
         chat_ids = self.root.ids.chat_layout.ids
-        title_bar_ids = self.root.ids.title_bar.ids
         
         chat_ids.send_button.bind(on_press=self.send_message)
         chat_ids.theme_button.bind(on_press=self.toggle_theme)
         chat_ids.settings_button.bind(on_press=self.show_settings_popup)
-        chat_ids.record_button.bind(on_touch_down=self.start_recording, on_touch_up=self.stop_recording_and_send)
-        chat_ids.emoji_button.bind(on_press=self.show_emoji_popup)
+        chat_ids.emoji_button.bind(on_press=self.toggle_emoji_panel)
         chat_ids.msg_entry.bind(on_text_validate=self.send_message)
         
         # Programmatically add Create Group button
@@ -983,10 +1257,6 @@ class VoiceChatApp(App):
             # Add to the main vertical controls layout, not the group actions one
             chat_ids.users_panel_controls.add_widget(search_layout, index=0) # Add at the top
 
-        title_bar_ids.minimize_btn.bind(on_press=lambda x: Window.minimize())
-        title_bar_ids.maximize_btn.bind(on_press=lambda x: self.toggle_maximize())
-        title_bar_ids.close_btn.bind(on_press=self.stop)
-
         if self.mode.startswith('p2p') and self.mode != 'p2p_bluetooth':
             self.init_p2p_mode()
         elif self.mode == 'p2p_bluetooth':
@@ -995,9 +1265,6 @@ class VoiceChatApp(App):
             self.init_server_mode()
         
         config = self.config_manager.load_config()
-        self.audio_manager = AudioManager()
-        self.apply_audio_settings(config)
-        self.audio_recorder = AudioRecorder(input_device_index=config.get('input_device_index'))
         self.init_hotkeys()
         self.apply_theme()
         self.root.opacity = 1
@@ -1006,14 +1273,12 @@ class VoiceChatApp(App):
         self.plugin_manager = PluginManager(self)
         self.plugin_manager.discover_and_load_plugins()
         self.emoji_manager = EmojiManager()
+        self.create_emoji_panel()
+        self.webrtc_manager.start()
         
         chat_ids.msg_entry.focus = True
-
-    def toggle_maximize(self):
-        if Window.fullscreen:
-            Window.fullscreen = False
-        else:
-            Window.fullscreen = 'auto'
+        # The native window is now used, so borderless setup is not required.
+        # Clock.schedule_once(self.setup_borderless_window, 0)
 
     def find_p2p_user(self, instance):
         username = self.search_user_input.text.strip()
@@ -1034,10 +1299,7 @@ class VoiceChatApp(App):
             'incoming_contact_request': self.on_incoming_contact_request,
             'contact_request_response': self.on_contact_request_response,
             'message_received': self.p2p_message_received,
-            'incoming_p2p_call': self.handle_p2p_call_request,
-            'p2p_call_response': self.handle_p2p_call_response,
-            'p2p_hang_up': self.handle_p2p_hang_up,
-            'hole_punch_successful': self.on_hole_punch_success,
+            'webrtc_signal': self.on_webrtc_signal,
             'secure_channel_established': self.on_secure_channel_established,
             'group_created': self.on_group_created,
             'group_message_received': self.on_group_message_received,
@@ -1110,17 +1372,44 @@ class VoiceChatApp(App):
         self.current_theme = 'dark' if self.current_theme == 'light' else 'light'
         self.apply_theme()
 
+    def _apply_windows_title_bar_theme(self):
+        """Applies the selected theme to the native Windows title bar."""
+        if sys.platform != 'win32':
+            return # This is a Windows-only feature
+
+        try:
+            import ctypes
+            from kivy.core.window import Window
+            
+            # Use Window.hwnd, available after the window is created.
+            hwnd = Window.hwnd
+            if not hwnd:
+                print("Could not get window handle (hwnd) for theming.")
+                return
+
+            # DWMWA_USE_IMMERSIVE_DARK_MODE attribute for dark title bar
+            # Should work for Windows 10 (1903+) and Windows 11
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            
+            value = ctypes.c_int(1 if self.current_theme == 'dark' else 0)
+            
+            result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                ctypes.byref(value),
+                ctypes.sizeof(value)
+            )
+            
+            if result != 0:
+                print(f"DwmSetWindowAttribute failed with HRESULT: {result}")
+        except Exception as e:
+            print(f"Failed to set native title bar theme: {e}")
+
     def apply_theme(self):
         theme = self.themes[self.current_theme]
         chat_ids = self.root.ids.chat_layout.ids
-        title_bar_ids = self.root.ids.title_bar.ids
         Window.clearcolor = theme['bg']
         set_bg(self.root, theme['bg'])
-        set_bg(self.root.ids.title_bar, theme['title_bar_bg'])
-        title_bar_ids.title.color = theme['text']
-        for btn_id in ['minimize_btn', 'maximize_btn', 'close_btn']:
-            title_bar_ids[btn_id].background_color = theme['button_bg']
-            title_bar_ids[btn_id].color = theme['button_text']
         set_bg(chat_ids.chat_panel, theme['panel_bg'])
         set_bg(chat_ids.users_panel, theme['panel_bg'])
         chat_ids.users_list_label.color = theme['text']
@@ -1165,6 +1454,11 @@ class VoiceChatApp(App):
                 if isinstance(widget, Button):
                     widget.background_color = theme['button_bg']
                     widget.color = theme['button_text']
+        
+        # Also apply the theme to the native title bar on Windows
+        # Schedule the native title bar theme to apply after one frame
+        # to ensure the window handle (hwnd) is available.
+        Clock.schedule_once(lambda dt: self._apply_windows_title_bar_theme(), 0)
 
     def send_message(self, instance=None):
         text = self.root.ids.chat_layout.ids.msg_entry.text.strip()
@@ -1214,170 +1508,103 @@ class VoiceChatApp(App):
         self.root.ids.chat_layout.ids.msg_entry.focus = True
 
     # --- Call Logic ---
-    def get_supported_rate(self, device_index, is_input=True):
-        p = pyaudio.PyAudio()
-        supported_rates = [48000, 44100, 32000, 16000]
-        try:
-            for rate in supported_rates:
-                try:
-                    if p.is_format_supported(rate, input_device=device_index if is_input else None, output_device=device_index if not is_input else None, input_channels=CHANNELS if is_input else 0, output_channels=CHANNELS if not is_input else 0, input_format=FORMAT, output_format=FORMAT):
-                        return rate
-                except ValueError:
-                    continue
-            return None
-        finally:
-            p.terminate()
-
     def initiate_call(self, target_username):
-        if self.p2p_audio_thread or self.active_group_call:
+        if self.webrtc_manager.peer_connections:
             self.add_message_to_box("Error: Already in a call.", 'global')
             return
-            
+
         if self.mode.startswith('p2p') and target_username not in self.contacts:
             self.request_contact(target_username)
             return
 
-        config = self.config_manager.load_config()
-        input_device_index = config.get('input_device_index')
-        supported_rate = self.get_supported_rate(input_device_index, is_input=True)
-        if not supported_rate:
-            self.add_message_to_box("Error: No supported sample rate for input device.", 'global')
-            return
-        self.negotiated_rate = supported_rate
-        self.pending_call_target = target_username
-        self.add_message_to_box(f"Setting up call to {target_username}...", 'global')
-        self.p2p_manager.initiate_hole_punch(target_username)
+        self.add_message_to_box(f"Initiating call to {target_username}...", 'global')
+        self.webrtc_manager.start_call(target_username)
+        self.show_call_popup(target_username)
+
+    def hang_up_call(self, peer_username=None):
+        if not peer_username:
+            # If no specific peer, hang up all connections
+            for peer in list(self.webrtc_manager.peer_connections.keys()):
+                self.webrtc_manager.end_call(peer)
+                self.p2p_manager.send_webrtc_signal(peer, 'hangup', {})
+        else:
+            self.webrtc_manager.end_call(peer_username)
+            self.p2p_manager.send_webrtc_signal(peer_username, 'hangup', {})
+
+        if self.call_popup:
+            self.call_popup.dismiss()
+            self.call_popup = None
+        self.add_message_to_box("Call ended.", 'global')
 
     @mainthread
-    def on_hole_punch_success(self, username, public_address):
-        if self.pending_call_target == username: # P2P Call
-            self.add_message_to_box(f"Hole punch successful. Sending call request...", 'global')
-            self.current_peer_addr = (public_address[0], public_address[1])
-            self.p2p_manager.send_p2p_call_request(username, self.negotiated_rate)
-        elif self.current_peer_addr is True: # P2P Call
-            self.add_message_to_box(f"Hole punch successful. Accepting call...", 'global')
-            self.current_peer_addr = (public_address[0], public_address[1])
-            self.p2p_manager.send_p2p_call_response(username, 'accept')
-            self.start_audio_stream(username)
-        elif username in self.pending_group_call_punches: # Group Call
-            self.pending_group_call_punches.remove(username)
-            self.add_message_to_box(f"Audio connection established with {username}.", self.active_group_call)
-            self.start_audio_stream(username, is_group_call=True, peer_addr=public_address)
+    def on_webrtc_signal(self, sender, signal_type, data):
+        if signal_type == 'offer':
+            self.show_incoming_call_popup(sender, data)
+        elif signal_type == 'answer':
+            self.webrtc_manager.handle_answer(sender, data)
+        elif signal_type == 'hangup':
+            self.webrtc_manager.end_call(sender)
+            if self.call_popup:
+                self.call_popup.dismiss()
+                self.call_popup = None
+            self.add_message_to_box(f"Call with {sender} ended.", 'global')
+        elif signal_type == 'busy':
+            self.add_message_to_box(f"Call failed: {sender} is busy.", 'global')
+            # End our side of the call attempt
+            self.hang_up_call(sender)
 
     @mainthread
-    def handle_p2p_call_request(self, sender_username, sample_rate):
-        if self.p2p_audio_thread or self.active_group_call:
-            self.p2p_manager.send_p2p_call_response(sender_username, 'busy')
+    def show_incoming_call_popup(self, peer_username, offer_sdp):
+        if self.webrtc_manager.peer_connections:
+            # Already in a call, reject automatically
+            print(f"Incoming call from {peer_username} while already in another call. Ignoring.")
+            # Future: send a 'busy' signal
+            self.p2p_manager.send_webrtc_signal(peer_username, 'busy', {})
             return
-        self.negotiated_rate = sample_rate
+
         box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text=self.tr.get('system_incoming_call_prompt_text', sender_username=sender_username)))
+        box.add_widget(Label(text=self.tr.get('incoming_call_from', peer=peer_username)))
         btn_layout = BoxLayout(spacing=10)
-        yes_btn = Button(text='Yes')
-        no_btn = Button(text='No')
-        btn_layout.add_widget(yes_btn)
-        btn_layout.add_widget(no_btn)
+        accept_btn = Button(text=self.tr.get('accept_button'))
+        decline_btn = Button(text=self.tr.get('decline_button'))
+        btn_layout.add_widget(accept_btn)
+        btn_layout.add_widget(decline_btn)
         box.add_widget(btn_layout)
-        popup = AnimatedPopup(title=self.tr.get('system_incoming_call_prompt_title'), content=box, size_hint=(0.7, 0.4), auto_dismiss=False)
         
-        def on_yes(inst):
+        popup = AnimatedPopup(title=self.tr.get('incoming_call_title'), content=box, size_hint=(0.7, 0.4), auto_dismiss=False)
+
+        def accept(instance):
             popup.dismiss()
-            self.add_message_to_box(f"Accepting call...", 'global')
-            self.current_peer_addr = True
-            self.p2p_manager.initiate_hole_punch(sender_username)
-        
-        def on_no(inst):
+            self.webrtc_manager.handle_offer(peer_username, offer_sdp)
+            self.show_call_popup(peer_username)
+            self.add_message_to_box(f"Accepted call from {peer_username}.", 'global')
+
+        def decline(instance):
             popup.dismiss()
-            self.p2p_manager.send_p2p_call_response(sender_username, 'reject')
-            self.negotiated_rate = None
-        
-        yes_btn.bind(on_press=on_yes)
-        no_btn.bind(on_press=on_no)
+            self.p2p_manager.send_webrtc_signal(peer_username, 'hangup', {})
+            self.add_message_to_box(f"Declined call from {peer_username}.", 'global')
+
+        accept_btn.bind(on_press=accept)
+        decline_btn.bind(on_press=decline)
         popup.open()
 
-    @mainthread
-    def handle_p2p_call_response(self, sender_username, response):
-        if response == 'accept' and self.pending_call_target == sender_username:
-            self.add_message_to_box(f"Call accepted.", 'global')
-            self.start_audio_stream(sender_username)
-        elif response in ['reject', 'busy']:
-            self.add_message_to_box(f"Call {response}.", 'global')
-            self.pending_call_target = self.current_peer_addr = self.negotiated_rate = None
-
-    @mainthread
-    def start_audio_stream(self, peer_username, is_group_call=False, peer_addr=None):
-        addr = peer_addr if is_group_call else self.current_peer_addr
-        if not addr or not isinstance(addr, tuple):
-            self.add_message_to_box(f"Error: No address for {peer_username}.", 'global')
-            return
-        if not self.negotiated_rate:
-            self.add_message_to_box("Error: No negotiated sample rate.", 'global')
-            return
-        
-        config = self.config_manager.load_config()
-        try:
-            audio_thread = AudioThread(self.udp_socket, addr, self.negotiated_rate, config.get('input_device_index'), config.get('output_device_index'))
-            audio_thread.start()
-            
-            if is_group_call:
-                self.audio_threads[peer_username] = audio_thread
-                # Update group call UI
-            else:
-                self.p2p_audio_thread = audio_thread
-                self.call_popup = CallPopup(peer_username, self.tr)
-                self.call_popup.bind(on_dismiss=lambda x: self.hang_up_call(), on_mute_toggle=lambda i, m: self.p2p_audio_thread.set_muted(m))
-                self.call_popup.open()
-                self.pending_call_target = None
-        except Exception as e:
-            self.add_message_to_box(f"Error starting audio: {e}", 'global')
-            self.hang_up_call()
-
-    def hang_up_call(self):
-        if self.active_group_call:
-            if self.mode.startswith('p2p'):
-                self.p2p_manager.send_group_hang_up(self.active_group_call)
-                for username, thread in self.audio_threads.items():
-                    thread.stop()
-                self.audio_threads.clear()
-            elif self.mode == 'server':
-                self.server_manager.leave_group_call(self.active_group_call)
-                if self.p2p_audio_thread: # In server mode, we use this for the single stream
-                    self.p2p_audio_thread.stop()
-                    self.p2p_audio_thread = None
-
-            self.add_message_to_box("Group call ended.", self.active_group_call)
-            if self.group_call_popup:
-                self.group_call_popup.dismiss()
-                self.group_call_popup = None
-            self.active_group_call = None
-            self.negotiated_rate = None
-            return
-
-        if self.p2p_audio_thread:
-            self.p2p_audio_thread.stop()
-            self.p2p_audio_thread = None
-            peer_username = self.p2p_manager.get_peer_username_by_addr(self.current_peer_addr)
-            if peer_username:
-                self.p2p_manager.send_p2p_hang_up(peer_username)
-            self.add_message_to_box("Call ended.", 'global')
-        
+    def show_call_popup(self, peer_username):
         if self.call_popup:
             self.call_popup.dismiss()
-            self.call_popup = None
-        self.current_peer_addr = self.negotiated_rate = None
+        
+        self.call_popup = CallPopup(peer_username, self.tr)
+        
+        def on_hang_up(instance):
+            self.hang_up_call(peer_username)
+        
+        def on_mute(instance, is_muted):
+            self.is_muted = is_muted
+            # TODO: Add actual mute logic for WebRTC here in self.webrtc_manager
+            self.add_message_to_box(f"Mute is now {'ON' if is_muted else 'OFF'}", 'global')
 
-    @mainthread
-    def handle_p2p_hang_up(self, sender_username):
-        self.add_message_to_box(f"{sender_username} ended the call.", 'global')
-        if self.p2p_audio_thread:
-            self.p2p_audio_thread.stop()
-            self.p2p_audio_thread = None
-        if self.call_popup:
-            self.call_popup.dismiss()
-            self.call_popup = None
-        self.current_peer_addr = self.negotiated_rate = None
-
-
+        self.call_popup.bind(on_dismiss=on_hang_up)
+        self.call_popup.bind(on_mute_toggle=on_mute)
+        self.call_popup.open()
     # --- UI Update Callbacks ---
     @mainthread
     def add_message_to_box(self, message_data, chat_id=None):
@@ -1604,9 +1831,8 @@ class VoiceChatApp(App):
         for message_data in history:
             self.add_message_to_box(message_data, chat_id)
         # Update title or some indicator
-        title = self.root.ids.title_bar.ids.title
         if chat_id == 'global':
-            title.text = "Voice Chat"
+            Window.title = "Voice Chat"
         else:
             if self.mode.startswith('p2p'):
                 group_info = self.p2p_manager.groups.get(chat_id, {})
@@ -1614,7 +1840,7 @@ class VoiceChatApp(App):
                 group_info = self.server_groups.get(chat_id, {})
             
             group_name = group_info.get('name', 'Group')
-            title.text = f"Voice Chat - {group_name}"
+            Window.title = f"Voice Chat - {group_name}"
             is_admin = group_info.get('admin') == self.username
             
             is_admin = group_info.get('admin') == self.username
@@ -1751,17 +1977,11 @@ class VoiceChatApp(App):
 
     # --- Group Call Logic ---
     def start_group_call(self, instance):
-        if self.active_chat == 'global' or self.active_group_call or self.p2p_audio_thread:
+        if self.active_chat == 'global' or self.active_group_call or self.webrtc_manager.peer_connections:
             return
         
         config = self.config_manager.load_config()
-        input_device_index = config.get('input_device_index')
-        supported_rate = self.get_supported_rate(input_device_index, is_input=True)
-        if not supported_rate:
-            self.add_message_to_box("Error: No supported sample rate for input device.", self.active_chat)
-            return
         
-        self.negotiated_rate = supported_rate
         self.active_group_call = self.active_chat
         
         if self.mode.startswith('p2p'):
@@ -1791,7 +2011,7 @@ class VoiceChatApp(App):
 
     @mainthread
     def on_incoming_group_call(self, group_id, admin_username, sample_rate):
-        if self.active_group_call or self.p2p_audio_thread:
+        if self.active_group_call or self.webrtc_manager.peer_connections:
             # Decline if already in a call
             # self.p2p_manager.send_group_call_response(group_id, 'reject') # Maybe not needed
             return
@@ -1839,21 +2059,11 @@ class VoiceChatApp(App):
 
     @mainthread
     def handle_group_call_hang_up(self, group_id, username):
-        if group_id == self.active_group_call and username in self.audio_threads:
-            self.audio_threads[username].stop()
-            del self.audio_threads[username]
+        if group_id == self.active_group_call:
+            # self.audio_threads was part of the old implementation
             self.add_message_to_box(f"System: {username} left the call.", group_id)
-            # Update UI
+            # Update UI for group calls will need to be implemented with WebRTC logic
 
-    def get_public_udp_addr(self):
-        try:
-            # Using a public STUN server
-            nat_type, external_ip, external_port = stun.get_ip_info(source_port=self.udp_socket.getsockname()[1])
-            return (external_ip, external_port)
-        except Exception as e:
-            print(f"STUN failed: {e}")
-            # Fallback to local address, might not work behind NAT
-            return self.udp_socket.getsockname()
 
     def join_server_group_call(self, group_id):
         self.active_group_call = group_id
@@ -1868,8 +2078,6 @@ class VoiceChatApp(App):
         server_addr = (self.server_manager.host, self.server_manager.port)
         try:
             # In server mode, we use p2p_audio_thread for the single stream to the server
-            self.p2p_audio_thread = AudioThread(self.udp_socket, server_addr, self.negotiated_rate, config.get('input_device_index'), config.get('output_device_index'))
-            self.p2p_audio_thread.start()
             self.add_message_to_box("Connected to group call via server.", group_id)
         except Exception as e:
             self.add_message_to_box(f"Error starting server audio stream: {e}", group_id)
@@ -1953,15 +2161,62 @@ class VoiceChatApp(App):
             self.add_message_to_box(message, group_id)
             # self.update_user_list(group_id) # TODO: Need a way to show group members
 
-    def show_emoji_popup(self, instance):
-        if not self.emoji_manager:
-            self.emoji_manager = EmojiManager()
-        popup = EmojiPopup(translator=self.tr, emoji_manager=self.emoji_manager)
-        popup.bind(on_select=self.add_emoji_to_input)
-        popup.open()
+    def create_emoji_panel(self):
+        emoji_panel = self.root.ids.chat_layout.ids.emoji_panel
+        
+        # Configure the tabbed panel to prevent text overlap and size tabs appropriately.
+        tab_panel = TabbedPanel(
+            do_default_tab=False,
+            tab_pos='top_left',
+            tab_width=150  # Give tabs a fixed width to prevent text overlap
+        )
+        categorized_emojis = self.emoji_manager.get_categorized_emojis()
 
-    def add_emoji_to_input(self, popup, emoji):
-        self.root.ids.chat_layout.ids.msg_entry.text += emoji
+        for category, emojis in categorized_emojis.items():
+            # Reduce font size on tab headers to ensure text fits
+            tab = TabbedPanelHeader(text=category, font_size='12sp')
+            scroll_view = ScrollView()
+            grid = GridLayout(cols=8, spacing=dp(5), size_hint_y=None)
+            grid.bind(minimum_height=grid.setter('height'))
+            
+            for emoji in emojis:
+                btn = Button(
+                    text=emoji,
+                    font_name='EmojiFont',
+                    font_size='24sp',
+                    # Use device-independent pixels for consistent button sizing
+                    size_hint=(None, None),
+                    size=(dp(40), dp(40))
+                )
+                btn.bind(on_press=self.add_emoji_to_input)
+                grid.add_widget(btn)
+            
+            scroll_view.add_widget(grid)
+            tab.content = scroll_view
+            tab_panel.add_widget(tab)
+            
+        emoji_panel.add_widget(tab_panel)
+
+    def toggle_emoji_panel(self, instance):
+        chat_layout = self.root.ids.chat_layout
+        emoji_panel = chat_layout.ids.emoji_panel
+        
+        # This approach avoids size_hint by directly manipulating width
+        target_width = chat_layout.width * 0.3
+        
+        if emoji_panel.width > 0: # If panel is visible, hide it
+            anim = Animation(width=0, d=0.2, t='out_quad')
+            emoji_panel.disabled = True
+            emoji_panel.opacity = 0
+        else: # If panel is hidden, show it
+            anim = Animation(width=target_width, d=0.2, t='out_quad')
+            emoji_panel.disabled = False
+            emoji_panel.opacity = 1
+            
+        anim.start(emoji_panel)
+
+    def add_emoji_to_input(self, instance):
+        self.root.ids.chat_layout.ids.msg_entry.text += instance.text
         self.root.ids.chat_layout.ids.msg_entry.focus = True
 
     def show_popup(self, title, message):
@@ -1972,6 +2227,12 @@ class VoiceChatApp(App):
         popup = AnimatedPopup(title=title, content=box, size_hint=(0.7, 0.4))
         ok_button.bind(on_press=popup.dismiss)
         popup.open()
+
+    def on_request_close(self, *args, **kwargs):
+        if self.settings_popup:
+            self.settings_popup.dismiss()
+            return True
+        return False
 
     def on_stop(self):
         if self.p2p_manager:
@@ -1986,45 +2247,7 @@ class VoiceChatApp(App):
             self.plugin_manager.unload_plugins()
         if self.hotkey_manager:
             self.hotkey_manager.stop()
-        if self.audio_recorder:
-            # No explicit stop needed as it's not a long-running thread
-            pass
         print("Application stopped.")
-
-    # --- Audio Message Logic ---
-    def start_recording(self, instance, touch):
-        if instance.collide_point(*touch.pos):
-            # Change button color to indicate recording
-            instance.background_color = (1, 0, 0, 1) # Red
-            self.audio_recorder.start()
-            self.add_message_to_box(self.tr.get('system_recording_started', 'Recording audio...'), 'global')
-
-    def stop_recording_and_send(self, instance, touch):
-        # Restore button color
-        self.apply_theme()
-        
-        filepath = self.audio_recorder.stop()
-        if not filepath:
-            return
-
-        self.add_message_to_box(self.tr.get('system_recording_finished', 'Recording finished. Sending...'), 'global')
-
-        # Determine target user (similar to image paste)
-        target_user = None
-        if self.mode.startswith('p2p'):
-            if self.active_chat == 'global' and self.p2p_manager and len(self.p2p_manager.peers) == 1:
-                target_user = list(self.p2p_manager.peers.keys())[0]
-            else:
-                self.add_message_to_box("System: Can only send audio messages in a 1-on-1 P2P chat.", self.active_chat)
-                return
-        else:
-            self.add_message_to_box("System: Audio messages are not yet supported in this mode.", self.active_chat)
-            return
-
-        if target_user:
-            # TODO: This functionality should be moved to a plugin
-            self.add_message_to_box("System: Audio message sending is being refactored.", self.active_chat)
-
 
     # --- Hotkey Logic ---
     def init_hotkeys(self):
@@ -2050,12 +2273,10 @@ class VoiceChatApp(App):
     def show_settings_popup(self, instance):
         try:
             config = self.config_manager.load_config()
-            if self.audio_manager is None:
-                self.audio_manager = AudioManager()
-            # The popup now needs the audio_manager instance
-            popup = SettingsPopup(self.tr, config, self.audio_manager)
-            popup.bind(on_dismiss=self.on_settings_dismiss)
-            popup.open()
+            # Pass the app instance to the settings popup so it can access the plugin manager
+            self.settings_popup = SettingsPopup(self.tr, config, app=self)
+            self.settings_popup.bind(on_dismiss=self.on_settings_dismiss)
+            self.settings_popup.open()
         except Exception as e:
             import traceback
             error_str = traceback.format_exc()
@@ -2063,6 +2284,7 @@ class VoiceChatApp(App):
             self.show_popup("Error", f"Could not open settings:\n{e}")
 
     def on_settings_dismiss(self, popup):
+        self.settings_popup = None
         config = self.config_manager.load_config()
         
         # Handle hotkey changes
@@ -2090,18 +2312,9 @@ class VoiceChatApp(App):
     def toggle_mute_hotkey(self):
         self.is_muted = not self.is_muted
         
-        # Mute/unmute 1-on-1 call
-        if self.p2p_audio_thread:
-            self.p2p_audio_thread.set_muted(self.is_muted)
+        # Mute/unmute WebRTC call
+        # This needs to be implemented in WebRTCManager by controlling the audio track
         
-        # Mute/unmute group call (P2P)
-        for thread in self.audio_threads.values():
-            thread.set_muted(self.is_muted)
-            
-        # Mute/unmute group call (Server) - uses p2p_audio_thread
-        if self.mode == 'server' and self.active_group_call and self.p2p_audio_thread:
-             self.p2p_audio_thread.set_muted(self.is_muted)
-
         # Update UI
         if self.call_popup:
             self.call_popup.is_muted = self.is_muted
@@ -2125,6 +2338,22 @@ class VoiceChatApp(App):
             self.audio_manager.set_volume(input_device, 'input', input_volume)
         if output_device is not None and output_volume is not None:
             self.audio_manager.set_volume(output_device, 'output', output_volume)
+
+    def on_file_drop(self, window, file_path, x, y):
+        """Callback for when a file is dropped onto the window."""
+        try:
+            filepath_str = file_path.decode('utf-8')
+            print(f"File dropped: {filepath_str}")
+            if self.plugin_manager:
+                # Find the file transfer plugin and call its handler
+                ft_plugin = self.plugin_manager.get_plugin_by_id('file_transfer')
+                if ft_plugin and ft_plugin['instance']:
+                    ft_plugin['instance'].handle_dropped_file(filepath_str)
+                else:
+                    self.add_message_to_box("System: File transfer plugin not loaded.", 'global')
+        except Exception as e:
+            print(f"Error handling dropped file: {e}")
+            self.add_message_to_box(f"Error handling drop: {e}", 'global')
 
 
 # Helper for theming

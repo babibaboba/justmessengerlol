@@ -58,6 +58,7 @@ class P2PManager:
             'group_call_response': [],
             'group_call_hang_up': [],
             'user_kicked': [],
+            'webrtc_signal': [],
         }
 
         self.my_local_ip = self._get_local_ip()
@@ -335,6 +336,12 @@ class P2PManager:
         elif command == 'contact_response':
             accepted = payload.get('accepted')
             self._emit('contact_request_response', username, accepted)
+
+        elif command == 'webrtc_signal':
+            if username and payload:
+                signal_type = payload.get('type')
+                data = payload.get('data')
+                self._emit('webrtc_signal', username, signal_type, data)
 
     def check_peers(self):
         while self.running:
@@ -622,3 +629,8 @@ class P2PManager:
         """Responds to a contact request."""
         # This response should be encrypted as the session key exchange should have happened.
         self._send_encrypted_command(target_username, 'contact_response', {'accepted': accepted})
+
+    def send_webrtc_signal(self, target_username, signal_type, data):
+        """Sends a WebRTC signaling message to a peer."""
+        payload = {'type': signal_type, 'data': data}
+        self._send_encrypted_command(target_username, 'webrtc_signal', payload)
