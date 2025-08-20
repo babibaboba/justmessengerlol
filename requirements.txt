@@ -11,3 +11,5 @@ pybluez-updated
 comtypes>=1.1.10
 emoji>=2.2.0
 numpy>=1.20.0
+sounddevice>=0.4.4
+soundfile>=0.11.0

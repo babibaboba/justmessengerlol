@@ -15,6 +15,10 @@ from pynput import keyboard
 from cryptography.fernet import Fernet
 import zstandard as zstd
 import msgpack
+import sounddevice as sd
+import soundfile as sf
+import numpy as np
+
 
 # Kivy imports
 from kivy.app import App
@@ -23,6 +27,7 @@ import asyncio
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay, MediaPlayer, MediaRecorder
 from kivy.uix.label import Label
+from kivy.uix.progressbar import ProgressBar
 from kivy.uix.button import Button
 from kivy.uix.textinput import TextInput
 from kivy.uix.gridlayout import GridLayout
@@ -210,8 +215,11 @@ class EmojiManager:
         # It's not a perfect categorization, but it's robust and doesn't rely on external libraries.
         categories = {
             'Smileys & People': list(range(0x1F600, 0x1F650)),
+            'Animals & Nature': list(range(0x1F400, 0x1F440)),
+            'Food & Drink': list(range(0x1F330, 0x1F390)),
             'Symbols & Pictographs': list(range(0x1F300, 0x1F600)),
             'Transport & Map': list(range(0x1F680, 0x1F700)),
+            'Objects': list(range(0x1F500, 0x1F540)),
             'Dingbats': list(range(0x2700, 0x27C0)),
             'Misc Symbols': list(range(0x2600, 0x2700)),
         }
@@ -273,6 +281,157 @@ class HotkeyManager(threading.Thread):
         if self.listener:
             self.listener.stop()
 
+
+class AudioManager:
+    """Manages all audio-related functionality like devices, recording, and playback."""
+    def __init__(self, callback_queue):
+        self.callback_queue = callback_queue
+        self.is_recording = False
+        self.is_testing_mic = False
+        self.recording_stream = None
+        self.mic_test_stream = None
+        self.recording_file = None
+        self.input_volume = 1.0  # Gain factor from 0.0 to 1.0+
+        self.output_volume = 1.0
+
+    def get_devices(self):
+        """Returns a tuple of (input_devices, output_devices) dictionaries."""
+        input_devices = {}
+        output_devices = {}
+        try:
+            devices = sd.query_devices()
+            for i, device in enumerate(devices):
+                display_name = f"{sd.query_hostapis(device['hostapi'])['name']}: {device['name']}"
+                if device['max_input_channels'] > 0:
+                    input_devices[display_name] = i
+                if device['max_output_channels'] > 0:
+                    output_devices[display_name] = i
+        except Exception as e:
+            print(f"Error getting audio devices: {e}")
+        return input_devices, output_devices
+
+    def start_recording(self, filename, device_index):
+        """Starts recording audio from a specific device to a file."""
+        if self.is_recording:
+            return False
+        
+        self.is_recording = True
+        
+        try:
+            samplerate = 44100
+            channels = 1
+            
+            self.recording_file = sf.SoundFile(filename, mode='x', samplerate=samplerate, channels=channels)
+
+            def audio_callback(indata, frames, time, status):
+                if status:
+                    print(status, file=sys.stderr)
+                if self.is_recording and self.recording_file:
+                    processed_data = indata * self.input_volume
+                    self.recording_file.write(processed_data)
+
+            self.recording_stream = sd.InputStream(
+                samplerate=samplerate,
+                device=device_index,
+                channels=channels,
+                callback=audio_callback
+            )
+            self.recording_stream.start()
+            print(f"Recording started to {filename}")
+            return True
+        except Exception as e:
+            print(f"Error starting recording: {e}")
+            self.is_recording = False
+            if self.recording_file:
+                self.recording_file.close()
+                self.recording_file = None
+            return False
+
+    def stop_recording(self):
+        """Stops the current recording."""
+        if not self.is_recording:
+            return
+        
+        print("Stopping recording...")
+        if self.recording_stream:
+            self.recording_stream.stop()
+            self.recording_stream.close()
+            self.recording_stream = None
+        
+        if self.recording_file:
+            self.recording_file.close()
+            self.recording_file = None
+            
+        self.is_recording = False
+        print("Recording stopped.")
+
+    def start_mic_test(self, device_index):
+        """Starts a microphone test, sending volume levels to the callback queue."""
+        if self.is_testing_mic:
+            return
+
+        self.is_testing_mic = True
+        try:
+            samplerate = 44100
+            
+            def audio_callback(indata, frames, time, status):
+                if status:
+                    print(status, file=sys.stderr)
+                # Apply input volume to the mic test data as well
+                processed_data = indata * self.input_volume
+                volume_norm = np.linalg.norm(processed_data) * 10
+                self.callback_queue.put(('mic_level', min(1.0, volume_norm)))
+
+            self.mic_test_stream = sd.InputStream(
+                device=device_index,
+                channels=1,
+                samplerate=samplerate,
+                callback=audio_callback
+            )
+            self.mic_test_stream.start()
+            print("Mic test started.")
+        except Exception as e:
+            print(f"Error starting mic test: {e}")
+            self.is_testing_mic = False
+
+    def stop_mic_test(self):
+        """Stops the microphone test."""
+        if not self.is_testing_mic:
+            return
+            
+        if self.mic_test_stream:
+            self.mic_test_stream.stop()
+            self.mic_test_stream.close()
+            self.mic_test_stream = None
+        self.is_testing_mic = False
+        print("Mic test stopped.")
+
+    def play_test_sound(self, device_index):
+        """Plays a test sound on the specified output device."""
+        try:
+            samplerate = 44100
+            frequency = 440
+            duration = 1.0
+            t = np.linspace(0., duration, int(samplerate * duration), endpoint=False)
+            amplitude = 0.5
+            waveform = amplitude * np.sin(2. * np.pi * frequency * t)
+            
+            # Apply output volume
+            processed_waveform = waveform * self.output_volume
+            
+            print(f"Playing test sound on device {device_index} with volume {self.output_volume}")
+            sd.play(processed_waveform, samplerate, device=device_index, blocking=False)
+        except Exception as e:
+            print(f"Error playing test sound: {e}")
+
+    def set_volume(self, level, vol_type='input'):
+        """Sets the input or output volume gain level (0.0 to ...)."""
+        if vol_type == 'input':
+            self.input_volume = level
+            print(f"Set input volume to {level}")
+        elif vol_type == 'output':
+            self.output_volume = level
+            print(f"Set output volume to {level}")
 
 class WebRTCManager(threading.Thread):
     def __init__(self, callback_queue):
@@ -745,7 +904,7 @@ class AudioMessageWidget(BoxLayout):
         self.height = 40
         
         self.label = Label(text=f"Audio from {sender}")
-        self.play_button = Button(text='▶ Play', size_hint_x=None, width=80)
+        self.play_button = Button(text='▶️ Play', size_hint_x=None, width=100, font_name='EmojiFont')
         self.play_button.bind(on_press=self.toggle_play)
         
         self.add_widget(self.label)
@@ -756,14 +915,14 @@ class AudioMessageWidget(BoxLayout):
             return
         if self.sound.state == 'play':
             self.sound.stop()
-            self.play_button.text = '▶ Play'
+            self.play_button.text = '▶️ Play'
         else:
             self.sound.play()
-            self.play_button.text = '❚❚ Pause'
+            self.play_button.text = '⏸️ Pause'
             self.sound.bind(on_stop=self.on_sound_stop)
 
     def on_sound_stop(self, instance):
-        self.play_button.text = '▶ Play'
+        self.play_button.text = '▶️ Play'
 
 
 class ModeSelectionPopup(AnimatedPopup):
@@ -874,6 +1033,7 @@ class SettingsPopup(AnimatedPopup):
         self.listener = None
         self.is_testing = False
         self.test_sound = None
+        self.saved = False
 
         # --- Main Layout ---
         main_layout = BoxLayout(orientation='vertical', spacing=5, padding=10)
@@ -881,10 +1041,20 @@ class SettingsPopup(AnimatedPopup):
         # --- Tabbed Panel for Settings ---
         tab_panel = TabbedPanel(do_default_tab=False)
         
+        # --- General Tab ---
+        general_tab = TabbedPanelHeader(text=self.tr.get('general_tab', 'General'))
+        general_tab.content = self.create_general_tab()
+        tab_panel.add_widget(general_tab)
+        
         # --- Hotkeys Tab ---
         hotkeys_tab = TabbedPanelHeader(text=self.tr.get('hotkeys_tab', 'Hotkeys'))
         hotkeys_tab.content = self.create_hotkeys_tab()
         tab_panel.add_widget(hotkeys_tab)
+
+        # --- Audio Tab ---
+        audio_tab = TabbedPanelHeader(text=self.tr.get('audio_tab', 'Audio'))
+        audio_tab.content = self.create_audio_tab()
+        tab_panel.add_widget(audio_tab)
 
         # --- Security Tab ---
         security_tab = TabbedPanelHeader(text=self.tr.get('security_tab', 'Security'))
@@ -909,6 +1079,28 @@ class SettingsPopup(AnimatedPopup):
         main_layout.add_widget(btn_layout)
         
         self.content = main_layout
+        
+    def create_general_tab(self):
+        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        layout.add_widget(Label(text=self.tr.get('language_label', 'Language'), font_size='18sp'))
+
+        # Get available languages from the translator
+        available_languages = {
+            'en': 'English',
+            'ru': 'Русский'
+        }
+        
+        current_lang_code = self.app.tr.get_language()
+        current_lang_name = available_languages.get(current_lang_code, 'English')
+
+        self.language_spinner = Spinner(
+            text=current_lang_name,
+            values=list(available_languages.values())
+        )
+        self.language_spinner.available_languages = available_languages # Store map
+        layout.add_widget(self.language_spinner)
+        
+        return layout
 
     def create_hotkeys_tab(self):
         layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
@@ -921,6 +1113,87 @@ class SettingsPopup(AnimatedPopup):
         self.record_button.bind(on_press=self.toggle_record)
         layout.add_widget(self.record_button)
         return layout
+
+    def create_audio_tab(self):
+        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        layout.add_widget(Label(text=self.tr.get('audio_settings_title', 'Audio Settings'), font_size='18sp'))
+
+        # --- Device Selection ---
+        input_devices, output_devices = self.app.audio_manager.get_devices()
+        
+        layout.add_widget(Label(text=self.tr.get('input_device_label', 'Input Device (Microphone)')))
+        self.input_device_spinner = Spinner(
+            values=list(input_devices.keys()),
+            text=self.config.get('input_device_name', 'Default')
+        )
+        self.input_device_spinner.bind(text=self.on_device_change)
+        layout.add_widget(self.input_device_spinner)
+
+        layout.add_widget(Label(text=self.tr.get('output_device_label', 'Output Device (Speakers)')))
+        self.output_device_spinner = Spinner(
+            values=list(output_devices.keys()),
+            text=self.config.get('output_device_name', 'Default')
+        )
+        layout.add_widget(self.output_device_spinner)
+
+        # Store the mapping from display name to device index
+        self.input_device_map = input_devices
+        self.output_device_map = output_devices
+
+        # --- Volume Controls ---
+        layout.add_widget(Label(text=self.tr.get('input_volume_label', 'Input Volume')))
+        raw_input_vol = self.config.get('input_volume', 80)
+        input_vol = float(raw_input_vol if raw_input_vol is not None else 80)
+        self.input_volume_slider = Slider(min=0, max=100, value=input_vol)
+        layout.add_widget(self.input_volume_slider)
+
+        layout.add_widget(Label(text=self.tr.get('output_volume_label', 'Output Volume')))
+        raw_output_vol = self.config.get('output_volume', 80)
+        output_vol = float(raw_output_vol if raw_output_vol is not None else 80)
+        self.output_volume_slider = Slider(min=0, max=100, value=output_vol)
+        layout.add_widget(self.output_volume_slider)
+
+        # --- Mic Test ---
+        test_layout = BoxLayout(spacing=10, size_hint_y=None, height=44)
+        self.mic_test_button = Button(text=self.tr.get('mic_test_button', 'Test Microphone'))
+        self.mic_test_button.bind(on_press=self.toggle_mic_test)
+        self.mic_level_bar = ProgressBar(max=1.0, value=0, size_hint_x=1.5)
+        test_layout.add_widget(self.mic_test_button)
+        test_layout.add_widget(self.mic_level_bar)
+        layout.add_widget(test_layout)
+        
+        # --- Speaker Test ---
+        speaker_test_button = Button(text=self.tr.get('speaker_test_button', 'Test Speakers'), size_hint_y=None, height=44)
+        speaker_test_button.bind(on_press=self.test_speakers)
+        layout.add_widget(speaker_test_button)
+
+        return layout
+    
+    def on_device_change(self, spinner, text):
+        # If a mic test is running, stop and restart it with the new device
+        if self.is_testing:
+            self.app.audio_manager.stop_mic_test()
+            device_name = self.input_device_spinner.text
+            device_index = self.input_device_map.get(device_name, sd.default.device[0])
+            self.app.audio_manager.start_mic_test(device_index)
+
+    def toggle_mic_test(self, instance):
+        self.is_testing = not self.is_testing
+        if self.is_testing:
+            self.mic_test_button.text = self.tr.get('mic_test_stop_button', 'Stop Test')
+            device_name = self.input_device_spinner.text
+            device_index = self.input_device_map.get(device_name, sd.default.device[0]) # Default input
+            self.app.audio_manager.start_mic_test(device_index)
+        else:
+            self.mic_test_button.text = self.tr.get('mic_test_button', 'Test Microphone')
+            self.app.audio_manager.stop_mic_test()
+            self.mic_level_bar.value = 0
+
+    def test_speakers(self, instance):
+        device_name = self.output_device_spinner.text
+        device_index = self.output_device_map.get(device_name, sd.default.device[1]) # Default output
+        # Run in a thread so it doesn't block the UI
+        threading.Thread(target=self.app.audio_manager.play_test_sound, args=(device_index,), daemon=True).start()
 
     def create_security_tab(self):
         layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
@@ -995,8 +1268,28 @@ class SettingsPopup(AnimatedPopup):
 
     def save_and_dismiss(self, instance):
         self.stop_listener()
-        self.hotkey = self.new_hotkey
+        if self.is_testing: # Stop mic test if it's running
+            self.toggle_mic_test(None)
         
+        self.hotkey = self.new_hotkey
+        self.saved = True
+        
+        # --- Save General Settings ---
+        selected_lang_name = self.language_spinner.text
+        # Find the language code from the name
+        lang_code = 'en' # default
+        for code, name in self.language_spinner.available_languages.items():
+            if name == selected_lang_name:
+                lang_code = code
+                break
+        self.config['language'] = lang_code
+        
+        # --- Save Audio Settings ---
+        self.config['input_device_name'] = self.input_device_spinner.text
+        self.config['output_device_name'] = self.output_device_spinner.text
+        self.config['input_volume'] = self.input_volume_slider.value
+        self.config['output_volume'] = self.output_volume_slider.value
+
         if 'security' not in self.config:
             self.config['security'] = {}
         self.config['security']['p2p_password'] = self.p2p_password_input.text
@@ -1091,11 +1384,13 @@ class VoiceChatApp(App):
         self.pending_call_target = None
         self.negotiated_rate = None
         self.callback_queue = queue.Queue()
+        self.audio_manager = AudioManager(self.callback_queue)
         self.webrtc_manager = WebRTCManager(self.callback_queue)
         self.hotkey_manager = HotkeyManager()
         self.is_muted = False
         self.plugin_manager = None
         self.emoji_manager = None
+        self.is_recording_audio_message = False
         self.root.opacity = 0
         self.contacts = set() # Users who have accepted contact requests
         self.search_user_input = None
@@ -1113,6 +1408,9 @@ class VoiceChatApp(App):
 
         Clock.schedule_interval(self.process_callbacks, 0.1)
         Window.bind(on_request_close=self.on_request_close, on_dropfile=self.on_file_drop)
+        
+        # Set window title before showing any popups
+        Window.title = self.tr.get('window_title')
         self.show_mode_selection_popup()
 
     def process_callbacks(self, dt):
@@ -1139,6 +1437,9 @@ class VoiceChatApp(App):
                     self.p2p_manager.send_webrtc_signal(event[1]['peer'], 'offer', event[1]['offer'])
                 elif event_type == 'webrtc_answer_created':
                     self.p2p_manager.send_webrtc_signal(event[1]['peer'], 'answer', event[1]['answer'])
+                elif event_type == 'mic_level':
+                    if self.settings_popup and self.settings_popup.is_testing:
+                        self.settings_popup.mic_level_bar.value = event[1]
 
             except queue.Empty:
                 break
@@ -1211,6 +1512,7 @@ class VoiceChatApp(App):
         chat_ids.theme_button.bind(on_press=self.toggle_theme)
         chat_ids.settings_button.bind(on_press=self.show_settings_popup)
         chat_ids.emoji_button.bind(on_press=self.toggle_emoji_panel)
+        chat_ids.record_button.bind(on_press=self.toggle_audio_message_record)
         chat_ids.msg_entry.bind(on_text_validate=self.send_message)
         
         # Programmatically add Create Group button
@@ -1267,6 +1569,7 @@ class VoiceChatApp(App):
         config = self.config_manager.load_config()
         self.init_hotkeys()
         self.apply_theme()
+        self.apply_audio_settings(config) # Apply saved audio settings
         self.root.opacity = 1
         
         # Initialize and load plugins
@@ -1382,7 +1685,7 @@ class VoiceChatApp(App):
             from kivy.core.window import Window
             
             # Use Window.hwnd, available after the window is created.
-            hwnd = Window.hwnd
+            hwnd = getattr(Window, 'hwnd', None)
             if not hwnd:
                 print("Could not get window handle (hwnd) for theming.")
                 return
@@ -1507,6 +1810,44 @@ class VoiceChatApp(App):
         self.root.ids.chat_layout.ids.msg_entry.text = ""
         self.root.ids.chat_layout.ids.msg_entry.focus = True
 
+    # --- Audio Message Logic ---
+    def toggle_audio_message_record(self, instance):
+        self.is_recording_audio_message = not self.is_recording_audio_message
+        chat_ids = self.root.ids.chat_layout.ids
+        
+        if self.is_recording_audio_message:
+            chat_ids.record_button.text = "⏹️" # Stop icon
+            config = self.config_manager.load_config()
+            device_name = config.get('input_device_name', 'Default')
+            input_devices, _ = self.audio_manager.get_devices()
+            device_index = input_devices.get(device_name, sd.default.device[0])
+            
+            # Create a unique filename
+            self.audio_message_path = os.path.join("audio_messages", f"{uuid.uuid4()}.wav")
+            os.makedirs("audio_messages", exist_ok=True)
+
+            if self.audio_manager.start_recording(self.audio_message_path, device_index):
+                self.add_message_to_box("System: Recording audio message...", self.active_chat)
+            else:
+                self.add_message_to_box("System: Failed to start recording.", self.active_chat)
+                self.is_recording_audio_message = False
+                chat_ids.record_button.text = "🎤" # Reset button
+        else:
+            chat_ids.record_button.text = "🎤" # Reset button
+            self.audio_manager.stop_recording()
+            self.add_message_to_box(f"System: Recording saved. Ready to send.", self.active_chat)
+            
+            # Create the audio widget and add it to the chat
+            widget = AudioMessageWidget(self.audio_message_path, self.username)
+            self.root.ids.chat_layout.ids.chat_box.add_widget(widget)
+            
+            # TODO: Send the audio file to peers. This requires file transfer logic.
+            # For now, it's only local.
+            message_data = {'id': str(uuid.uuid4()), 'sender': self.username, 'audio_path': self.audio_message_path, 'timestamp': datetime.now().isoformat()}
+            self.chat_history.setdefault(self.active_chat, []).append(message_data)
+            # self.p2p_manager.send_group_message(self.active_chat, message_data)
+
+
     # --- Call Logic ---
     def initiate_call(self, target_username):
         if self.webrtc_manager.peer_connections:
@@ -1626,6 +1967,13 @@ class VoiceChatApp(App):
             text_for_analysis = message_data
         elif isinstance(message_data, dict):
             sender = "You" if message_data.get('sender') == self.username else message_data.get('sender', 'Unknown')
+            # Check if it's an audio message
+            if 'audio_path' in message_data:
+                # Add the audio widget instead of a text label
+                widget = AudioMessageWidget(message_data['audio_path'], sender)
+                chat_box.add_widget(widget)
+                return
+            
             text = message_data.get('text', '')
             text_for_analysis = text
             try:
@@ -2175,16 +2523,28 @@ class VoiceChatApp(App):
         for category, emojis in categorized_emojis.items():
             # Reduce font size on tab headers to ensure text fits
             tab = TabbedPanelHeader(text=category, font_size='12sp')
-            scroll_view = ScrollView()
-            grid = GridLayout(cols=8, spacing=dp(5), size_hint_y=None)
-            grid.bind(minimum_height=grid.setter('height'))
             
+            # This grid will contain the emoji buttons
+            grid = GridLayout(cols=1, spacing=dp(5), size_hint_y=None) # Start with 1 col, will be updated
+            grid.bind(minimum_height=grid.setter('height'))
+
+            # This function will be called whenever the ScrollView's width changes
+            def update_cols(grid_layout, scroll_view_instance, width):
+                if width <= 0: return # Avoid calculations when panel is hidden
+                # dp(40) for button width, dp(5) for spacing. Total dp(45) per column.
+                new_cols = max(1, int(width / dp(45)))
+                grid_layout.cols = new_cols
+
+            # The ScrollView will handle scrolling and trigger the responsive grid logic
+            scroll_view = ScrollView(scroll_type=['bars', 'content'], bar_width=dp(10), scroll_wheel_distance=dp(40))
+            # Bind the update function to the ScrollView's width property
+            scroll_view.bind(width=partial(update_cols, grid))
+
             for emoji in emojis:
                 btn = Button(
                     text=emoji,
                     font_name='EmojiFont',
                     font_size='24sp',
-                    # Use device-independent pixels for consistent button sizing
                     size_hint=(None, None),
                     size=(dp(40), dp(40))
                 )
@@ -2285,7 +2645,14 @@ class VoiceChatApp(App):
 
     def on_settings_dismiss(self, popup):
         self.settings_popup = None
-        config = self.config_manager.load_config()
+
+        # Only apply changes if the user clicked "Save"
+        if not getattr(popup, 'saved', False):
+            return
+
+        # The popup has already modified this config object in memory.
+        # We just need to apply the changes and then save it.
+        config = popup.config
         
         # Handle hotkey changes
         new_hotkey = getattr(popup, 'hotkey', None)
@@ -2297,14 +2664,19 @@ class VoiceChatApp(App):
             config['hotkeys']['mute'] = hotkey_str
             self.add_message_to_box(self.tr.get('system_hotkey_set', hotkey=hotkey_str), 'global')
 
-        # Handle audio device changes
-        if hasattr(popup, 'config'):
-             config['input_device_index'] = popup.config.get('input_device_index')
-             config['output_device_index'] = popup.config.get('output_device_index')
-             config['input_volume'] = popup.config.get('input_volume')
-             config['output_volume'] = popup.config.get('output_volume')
-             self.add_message_to_box(self.tr.get('system_audio_settings_saved', 'Audio settings saved.'), 'global')
-             self.apply_audio_settings(config)
+        # Apply audio settings from the now-updated config
+        self.add_message_to_box(self.tr.get('system_audio_settings_saved', 'Audio settings saved.'), 'global')
+        self.apply_audio_settings(config)
+       
+        # Apply language change if it happened
+        new_lang = config.get('language', 'en')
+        if self.tr.get_language() != new_lang:
+            self.tr.set_language(new_lang)
+            # We might need to recreate the UI to apply language changes,
+            # which is complex. For now, we'll just show a message.
+            # A full implementation would require a restart or dynamic UI recreation.
+            self.show_popup("Language Changed", "The language will fully update on next restart.")
+            Window.title = self.tr.get('window_title') # Update title immediately
 
         self.config_manager.save_config(config)
 
@@ -2327,17 +2699,17 @@ class VoiceChatApp(App):
 
 
     def apply_audio_settings(self, config):
-        input_device = config.get('input_device_index')
-        output_device = config.get('output_device_index')
-        input_volume = config.get('input_volume')
-        output_volume = config.get('output_volume')
+        # Applies audio settings from the config to the AudioManager
+        input_volume = config.get('input_volume', 80)
+        output_volume = config.get('output_volume', 80)
 
-        if input_device is not None and input_volume is not None:
-            # It might be better to check if the device is available first
-            # but for now, we'll just try to set it.
-            self.audio_manager.set_volume(input_device, 'input', input_volume)
-        if output_device is not None and output_volume is not None:
-            self.audio_manager.set_volume(output_device, 'output', output_volume)
+        # Convert slider value [0, 100] to a gain multiplier [0.0, 1.0]
+        # Ensure we handle potential None values gracefully, defaulting to 80.
+        input_gain = (input_volume or 80) / 100.0
+        output_gain = (output_volume or 80) / 100.0
+        
+        self.audio_manager.set_volume(input_gain, 'input')
+        self.audio_manager.set_volume(output_gain, 'output')
 
     def on_file_drop(self, window, file_path, x, y):
         """Callback for when a file is dropped onto the window."""
