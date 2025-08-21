@@ -44,7 +44,7 @@
             TextInput:
                 id: msg_entry
                 multiline: False
-                hint_text: "Type a message..."
+                hint_text: app.tr.get('message_input_hint', "Type a message...")
                 font_name: 'EmojiFont'
             Button:
                 id: record_button
@@ -60,7 +60,7 @@
                 width: 40
             Button:
                 id: send_button
-                text: 'Send'
+                text: app.tr.get('send_button', 'Send')
                 size_hint_x: None
                 width: 80
 
@@ -87,7 +87,7 @@
             
             Label:
                 id: users_list_label
-                text: 'Users Online'
+                text: app.tr.get('users_in_chat_label', 'Users Online')
                 size_hint_y: None
                 height: 30
         
@@ -113,4 +113,4 @@
                 width: 44
             Button:
                 id: theme_button
-                text: 'Toggle Theme'
+                text: app.tr.get('toggle_theme_button', 'Toggle Theme')

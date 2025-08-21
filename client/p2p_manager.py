@@ -6,6 +6,7 @@ import asyncio
 import stun
 import msgpack
 import zstandard as zstd
+import sys
 from kademlia.network import Server as KademliaServer
 from encryption_manager import EncryptionManager
 
@@ -14,23 +15,27 @@ BROADCAST_ADDR = '<broadcast>'
 STUN_SERVER = "stun.l.google.com"
 STUN_PORT = 19302
 
+
 class P2PManager:
     def __init__(self, username, chat_history, mode='internet'):
         self.username = username
         self.udp_socket = None
         self.chat_history = chat_history
         self.mode = mode
-        self.peers = {} # {username: {'local_ip': str, 'public_addr': (ip, port), 'last_seen': float}}
-        self.groups = {} # {group_id: {'name': str, 'members': {username}, 'admin': username}}
+        self.my_port = P2P_PORT
+        # {username: {'local_ip': str, 'public_addr': (ip, port), 'last_seen': float, 'port': int}}
+        self.peers = {}
+        self.groups = {}  # {group_id: {'name': str, 'members': {username}, 'admin': username}}
         self.running = True
         self.dht_node = None
         self.dht_thread = None
         self.dht_loop = None
-        
+        self.pending_session_acks = {}
+
         self.encryption_manager = EncryptionManager()
         self.zstd_c = zstd.ZstdCompressor()
         self.zstd_d = zstd.ZstdDecompressor()
-        
+
         self.callbacks = {
             'peer_discovered': [],
             'peer_lost': [],
@@ -62,15 +67,16 @@ class P2PManager:
         }
 
         self.my_local_ip = self._get_local_ip()
-        self.my_public_addr = None # (ip, port)
+        self.my_public_addr = None  # (ip, port)
 
         if self.mode == 'local':
             self.dht_node = None
             self.dht_thread = None
-            self.broadcast_thread = threading.Thread(target=self.send_discovery_broadcast)
+            self.broadcast_thread = threading.Thread(
+                target=self.send_discovery_broadcast)
             self.listen_thread = threading.Thread(target=self.listen_for_peers)
             self.check_thread = threading.Thread(target=self.check_peers)
-        else: # internet mode
+        else:  # internet mode
             self.broadcast_thread = None
             self.listen_thread = None
             self.check_thread = None
@@ -92,18 +98,36 @@ class P2PManager:
                 callback(*args)
 
     def start(self):
-        try:
-            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Use exclusive address use on Windows to prevent multiple clients from
+        # binding to the same port, which is necessary for the dynamic port
+        # allocation to work correctly.
+        if sys.platform == 'win32':
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else: # For other OSes, REUSEADDR is the standard.
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if self.mode == 'local':
-                self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                self.udp_socket.bind(('', P2P_PORT))
-            else: # internet
-                self.udp_socket.bind(('', 0))
-        except OSError as e:
-            print(f"FATAL: Could not bind to port for P2P. Is another instance running? Error: {e}")
-            # self._emit('fatal_error', f"Port {P2P_PORT} is already in use.")
-            return
+
+        if self.mode == 'local':
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # Try to bind to P2P_PORT, but find an open one if it's taken.
+            port_found = False
+            port = P2P_PORT
+            while not port_found and port < P2P_PORT + 50:
+                try:
+                    self.udp_socket.bind(('', port))
+                    port_found = True
+                    self.my_port = port
+                    print(f"P2P Manager bound to local port {self.my_port}")
+                except OSError:
+                    print(f"Port {port} is busy, trying next one...")
+                    port += 1
+            if not port_found:
+                print(f"FATAL: Could not find any free port for P2P.")
+                return
+        else:  # internet
+            self.udp_socket.bind(('', 0))
+            self.my_port = self.udp_socket.getsockname()[1]
+            print(f"P2P Manager bound to internet port {self.my_port}")
 
         if self.mode == 'local':
             if self.listen_thread: self.listen_thread.start()
@@ -138,62 +162,120 @@ class P2PManager:
     def _get_public_address(self):
         print("Attempting to get public IP from STUN server...")
         try:
-            nat_type, external_ip, external_port = stun.get_ip_info(stun_host=STUN_SERVER, stun_port=STUN_PORT)
+            nat_type, external_ip, external_port = stun.get_ip_info(
+                stun_host=STUN_SERVER, stun_port=STUN_PORT)
             self.my_public_addr = (external_ip, external_port)
-            print(f"STUN Result: NAT Type={nat_type}, Public Address={self.my_public_addr}")
+            print(
+                f"STUN Result: NAT Type={nat_type}, Public Address={self.my_public_addr}")
         except Exception as e:
             print(f"STUN request failed: {e}. Falling back to local IP.")
             self.my_public_addr = (self.my_local_ip, P2P_PORT)
 
     def send_discovery_broadcast(self):
-        message = self._pack_data({'command': 'discovery', 'username': self.username})
+        message = self._pack_data({
+            'command': 'discovery',
+            'username': self.username,
+            'port': self.my_port
+        })
         while self.running:
-            self.udp_socket.sendto(message, (BROADCAST_ADDR, P2P_PORT))
+            # In local mode, iterate through a range of ports to find other clients.
+            for port in range(P2P_PORT, P2P_PORT + 50):
+                try:
+                    self.udp_socket.sendto(message, (BROADCAST_ADDR, port))
+                except Exception as e:
+                    print(f"Broadcast error on port {port}: {e}")
             time.sleep(5)
 
     def listen_for_peers(self):
         while self.running:
             try:
-                data, addr = self.udp_socket.recvfrom(4096) # Increased buffer for history
+                data, addr = self.udp_socket.recvfrom(
+                    4096)  # Increased buffer for history
                 if addr[0] == self.my_local_ip or not data:
                     continue
                 message = self._unpack_data(data)
+                if not message:
+                    print(f"Received empty or corrupted packet from {addr}")
+                    continue
                 self.process_p2p_command(message, addr)
             except Exception as e:
                 if self.running:
                     print(f"Error in P2P listener: {e}")
 
     def process_p2p_command(self, message, addr):
+        if not message:
+            print(f"process_p2p_command received an empty message from {addr}. Ignoring.")
+            return
         command = message.get('command')
         username = message.get('username')
         payload = message.get('payload')
 
+        if not username or username == self.username:
+            return
+        
+        print(f"[RECV] Command '{command}' from {username}@{addr}")
+
+        # This is the core of reliable NAT traversal and P2P communication.
+        # The listening port can be in the top-level message OR in the payload.
+        # This handles both 'discovery' (top-level) and 'contact_request' (payload).
+        peer_port = message.get('port')
+        if peer_port is None and isinstance(payload, dict):
+            peer_port = payload.get('port')
+
+        # Fallback to the source address port if not specified in the message.
+        if peer_port is None:
+            peer_port = addr[1]
+
+        peer_addr = (addr[0], peer_port)
+
+        if username in self.peers:
+            self.peers[username]['public_addr'] = peer_addr
+            self.peers[username]['last_seen'] = time.time()
+            self.peers[username]['port'] = peer_port
+        
         if command == 'discovery':
-            if username and username not in self.peers:
-                self._emit('peer_discovered', username, addr[0])
+            if username not in self.peers:
+                self._emit('peer_discovered', username, peer_addr[0])
+            # Always update address information and attempt key exchange on discovery.
+            self.peers[username] = {
+                'local_ip': peer_addr[0],
+                'public_addr': peer_addr,
+                'last_seen': time.time(),
+                'port': peer_port
+            }
+            # Only start a key exchange if we don't already have a secure channel.
+            # This prevents the endless handshake loop.
+            if not self.encryption_manager.has_session_key(username):
                 self.send_public_key(username)
-            if username:
-                self.peers[username] = {'local_ip': addr[0], 'public_addr': None, 'last_seen': time.time()}
         elif command == 'public_key':
-            if username and payload.get('key'):
+            if payload.get('key'):
                 if self.encryption_manager.add_peer_public_key(username, payload['key']):
                     print(f"Added public key for {username}.")
                     # Respond with our own public key if they requested it.
                     if payload.get('request', True):
                         self.send_public_key(username, request_key=False)
 
-                    # To avoid both peers initiating, establish a convention.
-                    # For example, the peer with the lexicographically greater username initiates.
+                    # To prevent a race condition where both peers initiate a session key
+                    # exchange simultaneously, we use a tie-breaker. The peer with the
+                    # lexicographically greater username is responsible for initiating.
                     if self.username > username:
-                        print(f"My username '{self.username}' is greater than '{username}', initiating session key exchange.")
+                        print(f"Public key for {username} is registered. Initiating session key exchange (I am initiator).")
                         self.initiate_session_key_exchange(username)
                     else:
-                        print(f"My username '{self.username}' is not greater than '{username}', waiting for them to initiate.")
+                        print(f"Public key for {username} is registered. Waiting for peer to initiate session key exchange.")
         elif command == 'session_key':
-            if username and payload.get('key'):
+            handshake_id = payload.get('handshake_id')
+            if payload.get('key') and handshake_id:
                 if self.encryption_manager.receive_session_key(username, payload['key']):
                     self._emit('secure_channel_established', username)
                     self.request_history(username, 'global')
+                    # Acknowledge the receipt of the session key
+                    self.send_peer_command(username, 'session_key_ack', {'handshake_id': handshake_id})
+        elif command == 'session_key_ack':
+            handshake_id = payload.get('handshake_id')
+            if handshake_id in self.pending_session_acks:
+                print(f"Received session key ACK for handshake {handshake_id}")
+                self.pending_session_acks.pop(handshake_id, None)
         elif command == 'encrypted_message':
             if username and payload:
                 decrypted_payload = self.encryption_manager.decrypt_message(username, payload)
@@ -286,7 +368,7 @@ class P2PManager:
             self._emit('p2p_hang_up', username)
         elif command == 'hole_punch_syn':
             print(f"Received hole punch SYN from {username} at {addr}. Sending ACK.")
-            self.send_peer_command(username, 'hole_punch_ack', {}, force_address=addr)
+            self.send_peer_command(username, 'hole_punch_ack', {})
         elif command == 'hole_punch_ack':
             print(f"Received hole punch ACK from {username} at {addr}. Hole punch successful!")
             self._emit('hole_punch_successful', username, addr)
@@ -325,17 +407,27 @@ class P2PManager:
                     if kicked_user in self.groups[group_id]['members']:
                         self.groups[group_id]['members'].remove(kicked_user)
                     self._emit('user_kicked', group_id, kicked_user, admin_user)
-
-                if self.groups[group_id]['admin'] == username:
-                    if kicked_user in self.groups[group_id]['members']:
-                        self.groups[group_id]['members'].remove(kicked_user)
-                    self._emit('user_kicked', group_id, kicked_user, admin_user)
         elif command == 'contact_request':
-            password_hash = payload.get('password_hash')
-            self._emit('incoming_contact_request', username, password_hash)
+            if username:
+                if username not in self.peers:
+                    self._emit('peer_discovered', username, peer_addr[0])
+                # Always update address with the explicit port from payload if available.
+                self.peers[username] = {
+                    'local_ip': peer_addr[0],
+                    'public_addr': peer_addr,
+                    'last_seen': time.time(),
+                    'port': peer_port
+                }
+            self._emit('incoming_contact_request', username, payload) # Pass the whole payload
         elif command == 'contact_response':
             accepted = payload.get('accepted')
             self._emit('contact_request_response', username, accepted)
+            if accepted:
+                print(f"Contact request accepted by {username}, initiating key exchange.")
+                # The peer's address was already updated by the logic at the start of this function.
+                # Use the same tie-breaker logic to avoid a handshake race condition.
+                if self.username > username:
+                    self.send_public_key(username)
 
         elif command == 'webrtc_signal':
             if username and payload:
@@ -374,27 +466,34 @@ class P2PManager:
         for username in list(self.peers.keys()):
             self._send_encrypted_command(username, 'edit_message', payload)
 
-    def send_peer_command(self, target_username, command, payload, force_address=None):
-        if not force_address and target_username not in self.peers:
-            print(f"Error: peer {target_username} not found.")
+    def send_peer_command(self, target_username, command, payload):
+        if target_username == self.username:
             return
         
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if target_username not in self.peers:
+            print(f"Error: peer {target_username} not found.")
+            self._emit('peer_not_found', target_username)
+            return
+
+        peer_data = self.peers.get(target_username, {})
+        # The public_addr now correctly stores the specific listening port of the peer.
+        addr = peer_data.get('public_addr')
+
+        if not addr:
+            print(f"Error: No address found for peer {target_username}.")
+            return
+
         message_data = {'command': command, 'username': self.username, 'payload': payload}
         message_bytes = self._pack_data(message_data)
-        
-        addr = force_address
-        if not addr:
-            peer_data = self.peers[target_username]
-            addr = peer_data.get('public_addr') or (peer_data.get('local_ip'), P2P_PORT)
 
         try:
-            print(f"Sending command '{command}' to {target_username} at {addr}")
-            sock.sendto(message_bytes, addr)
+            if self.udp_socket:
+                print(f"Sending command '{command}' to {target_username} at {addr}")
+                self.udp_socket.sendto(message_bytes, addr)
+            else:
+                print("Error: UDP socket is not initialized.")
         except Exception as e:
-            print(f"Could not send command to peer {target_username}: {e}")
-        finally:
-            sock.close()
+            print(f"Could not send command to peer {target_username} at {addr}: {e}")
 
     def _run_dht(self):
         self.dht_loop = asyncio.new_event_loop()
@@ -472,7 +571,8 @@ class P2PManager:
 
         peer_info = self.peers[target_username]
         public_addr = peer_info.get('public_addr')
-        local_addr = (peer_info.get('local_ip'), P2P_PORT)
+        peer_port = peer_info.get('port', P2P_PORT)
+        local_addr = (peer_info.get('local_ip'), peer_port)
 
         if not public_addr:
             print("Peer does not have a public address, trying local.")
@@ -501,8 +601,28 @@ class P2PManager:
 
     def initiate_session_key_exchange(self, target_username):
         _, encrypted_key = self.encryption_manager.generate_session_key(target_username)
-        if encrypted_key:
-            self.send_peer_command(target_username, 'session_key', {'key': encrypted_key})
+        if not encrypted_key:
+            print(f"Failed to generate session key for {target_username}. Do we have their public key?")
+            return
+
+        handshake_id = str(time.time())
+        payload = {'key': encrypted_key, 'handshake_id': handshake_id}
+
+        def retry_send():
+            retry_count = 0
+            while self.running and handshake_id in self.pending_session_acks and retry_count < 5:
+                print(f"Sending session key to {target_username} (attempt {retry_count + 1})")
+                self.send_peer_command(target_username, 'session_key', payload)
+                time.sleep(1)
+                retry_count += 1
+            if handshake_id in self.pending_session_acks:
+                print(f"Session key exchange with {target_username} timed out.")
+                self.pending_session_acks.pop(handshake_id, None)
+
+        self.pending_session_acks[handshake_id] = True # Mark as pending
+        retry_thread = threading.Thread(target=retry_send)
+        retry_thread.daemon = True
+        retry_thread.start()
 
     def send_p2p_call_request(self, target_username, sample_rate):
         self._send_encrypted_command(target_username, 'p2p_call_request', {'sample_rate': sample_rate})
@@ -618,17 +738,21 @@ class P2PManager:
             self.groups[group_id]['members'].remove(username_to_kick)
         self._emit('user_kicked', group_id, username_to_kick, self.username)
 
-    def send_contact_request(self, target_username, password_hash=None):
-        """Sends a contact request to a user, optionally with a password hash."""
-        payload = {'password_hash': password_hash}
+    def send_contact_request(self, target_username):
+        """Sends a contact request to a user."""
+        payload = {'port': self.my_port}
         # Contact requests are not encrypted with session keys as they are pre-session.
-        # They are sent in plain text (or could be encrypted with the password itself).
         self.send_peer_command(target_username, 'contact_request', payload)
 
     def send_contact_response(self, target_username, accepted):
-        """Responds to a contact request."""
-        # This response should be encrypted as the session key exchange should have happened.
-        self._send_encrypted_command(target_username, 'contact_response', {'accepted': accepted})
+        """Responds to a contact request (plain-text; session keys may not exist yet)."""
+        payload = {'accepted': accepted}
+        # Send unencrypted because secure channel might not be established at this stage.
+        self.send_peer_command(target_username, 'contact_response', payload)
+        if accepted:
+            # If we accept, we kick off the key exchange from our side.
+            print(f"Accepted contact request from {target_username}, sending public key.")
+            self.send_public_key(target_username)
 
     def send_webrtc_signal(self, target_username, signal_type, data):
         """Sends a WebRTC signaling message to a peer."""

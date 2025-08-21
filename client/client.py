@@ -832,17 +832,56 @@ class ContactRequestPopup(AnimatedPopup):
 # The EmojiPopup class is no longer needed and will be removed.
 # The functionality will be integrated into the main app class.
 
+class PasswordPromptPopup(AnimatedPopup):
+   def __init__(self, username, translator, **kwargs):
+       super().__init__(**kwargs)
+       self.tr = translator
+       self.title = self.tr.get('password_prompt_title', 'Password Required')
+       self.size_hint = (0.7, 0.5)
+       self.auto_dismiss = False
+
+       layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
+       layout.add_widget(Label(text=self.tr.get('password_prompt_text', username=username)))
+       
+       self.password_input = TextInput(multiline=False, password=True)
+       layout.add_widget(self.password_input)
+       
+       btn_layout = BoxLayout(spacing=10)
+       ok_btn = Button(text=self.tr.get('ok_button', 'OK'))
+       cancel_btn = Button(text=self.tr.get('cancel_button', 'Cancel'))
+       btn_layout.add_widget(ok_btn)
+       btn_layout.add_widget(cancel_btn)
+       layout.add_widget(btn_layout)
+       
+       self.content = layout
+       
+       ok_btn.bind(on_press=self.submit)
+       cancel_btn.bind(on_press=self.cancel)
+       
+       self.register_event_type('on_submit')
+
+   def submit(self, instance):
+       self.dispatch('on_submit', self.password_input.text)
+       self.dismiss()
+
+   def cancel(self, instance):
+       self.dispatch('on_submit', None) # Indicate cancellation
+       self.dismiss()
+
+   def on_submit(self, password):
+       pass
+
 class GroupCallPopup(AnimatedPopup):
     # Placeholder for now
     def __init__(self, group_name, translator, **kwargs):
         super().__init__(**kwargs)
         self.tr = translator
-        self.title = f"Group Call - {group_name}"
+        self.title = self.tr.get('group_call_title', group_name=group_name)
         self.size_hint = (0.7, 0.6)
         self.auto_dismiss = False
         layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
         self.participants_list = BoxLayout(orientation='vertical')
-        layout.add_widget(Label(text="Participants:"))
+        layout.add_widget(Label(text=self.tr.get('participants_label', 'Participants:')))
         layout.add_widget(self.participants_list)
         hang_up_button = Button(text=self.tr.get('hang_up_button'))
         hang_up_button.bind(on_press=self.hang_up)
@@ -869,7 +908,7 @@ class ManageGroupPopup(AnimatedPopup):
         for member in members:
             member_layout = BoxLayout(size_hint_y=None, height=40)
             member_label = Label(text=member)
-            kick_button = Button(text='Kick', size_hint_x=None, width=80)
+            kick_button = Button(text=self.tr.get('kick_button', 'Kick'), size_hint_x=None, width=80)
             kick_button.bind(on_press=partial(self.kick_user, member))
             
             member_layout.add_widget(member_label)
@@ -903,8 +942,8 @@ class AudioMessageWidget(BoxLayout):
         self.size_hint_y = None
         self.height = 40
         
-        self.label = Label(text=f"Audio from {sender}")
-        self.play_button = Button(text='▶️ Play', size_hint_x=None, width=100, font_name='EmojiFont')
+        self.label = Label(text=self.tr.get('audio_from_sender', sender=sender))
+        self.play_button = Button(text=self.tr.get('play_button_play', '▶️ Play'), size_hint_x=None, width=100, font_name='EmojiFont')
         self.play_button.bind(on_press=self.toggle_play)
         
         self.add_widget(self.label)
@@ -915,14 +954,14 @@ class AudioMessageWidget(BoxLayout):
             return
         if self.sound.state == 'play':
             self.sound.stop()
-            self.play_button.text = '▶️ Play'
+            self.play_button.text = self.tr.get('play_button_play', '▶️ Play')
         else:
             self.sound.play()
-            self.play_button.text = '⏸️ Pause'
+            self.play_button.text = self.tr.get('play_button_pause', '⏸️ Pause')
             self.sound.bind(on_stop=self.on_sound_stop)
 
     def on_sound_stop(self, instance):
-        self.play_button.text = '▶️ Play'
+        self.play_button.text = self.tr.get('play_button_play', '▶️ Play')
 
 
 class ModeSelectionPopup(AnimatedPopup):
@@ -963,7 +1002,7 @@ class UsernamePopup(AnimatedPopup):
         layout.add_widget(Label(text=self.tr.get('username_dialog_label')))
         self.username_input = TextInput(text=current_username, multiline=False)
         layout.add_widget(self.username_input)
-        ok_button = Button(text="OK")
+        ok_button = Button(text=self.tr.get('ok_button', 'OK'))
         ok_button.bind(on_press=self.validate_username)
         layout.add_widget(ok_button)
         self.content = layout
@@ -1099,6 +1138,12 @@ class SettingsPopup(AnimatedPopup):
         )
         self.language_spinner.available_languages = available_languages # Store map
         layout.add_widget(self.language_spinner)
+        
+        layout.add_widget(Label(text="")) # Spacer
+        
+        return_button = Button(text=self.tr.get('return_to_main_menu_button', 'Return to Main Menu'), size_hint_y=None, height=44)
+        return_button.bind(on_press=self.app.return_to_main_menu)
+        layout.add_widget(return_button)
         
         return layout
 
@@ -1345,6 +1390,7 @@ class SettingsPopup(AnimatedPopup):
 
 class VoiceChatApp(App):
     def build(self):
+        self.icon = 'JustMessenger.png'
         # Register emoji font
         # Let's try to find a suitable emoji font
         font_paths = [
@@ -1502,6 +1548,58 @@ class VoiceChatApp(App):
         self.config_manager.save_config(config)
         self.initialize_app()
 
+    def return_to_main_menu(self, instance=None):
+        """Shuts down the current session and returns to the mode selection screen."""
+        # Dismiss settings if it's open
+        if self.settings_popup:
+            # Unbind dismiss to prevent save logic from running
+            self.settings_popup.unbind(on_dismiss=self.on_settings_dismiss)
+            self.settings_popup.dismiss()
+
+        # 1. Shut down all managers and network activity
+        self.on_stop() # Use the existing on_stop logic
+
+        # 2. Reset the UI to a clean state
+        chat_ids = self.root.ids.chat_layout.ids
+        chat_ids.chat_box.clear_widgets()
+        chat_ids.users_list.clear_widgets()
+        
+        # Remove dynamically added widgets like search or bluetooth scan
+        if self.search_user_input and self.search_user_input.parent:
+            chat_ids.users_panel_controls.remove_widget(self.search_user_input.parent)
+        if hasattr(self, 'scan_bt_button') and self.scan_bt_button.parent:
+             chat_ids.users_panel_controls.remove_widget(self.scan_bt_button)
+
+
+        # 3. Reset internal state variables
+        self.p2p_manager = None
+        self.server_manager = None
+        self.bluetooth_manager = None
+        self.username = None
+        self.mode = None
+        self.server_groups = {}
+        self.active_group_call = None
+        self.pending_group_call_punches = set()
+        self.call_popup = None
+        self.group_call_popup = None
+        self.current_peer_addr = None
+        self.pending_call_target = None
+        self.negotiated_rate = None
+        self.is_muted = False
+        # Don't reset plugin manager, as it's loaded once.
+        # self.plugin_manager = None
+        self.is_recording_audio_message = False
+        self.contacts = set()
+        self.search_user_input = None
+        self.hotkey_manager = HotkeyManager() # Re-create the manager for the new session
+        
+        self.chat_history = {'global': []}
+        self.initialized = False # Allow re-initialization
+        self.active_chat = 'global'
+        
+        # 4. Show the mode selection popup to start over
+        self.show_mode_selection_popup()
+
     def initialize_app(self):
         if self.initialized:
             return
@@ -1522,19 +1620,19 @@ class VoiceChatApp(App):
         self.create_group_button.bind(on_press=self.show_create_group_popup)
         group_actions_layout.add_widget(self.create_group_button)
 
-        self.invite_user_button = Button(text='Invite', size_hint_x=None, width=60)
+        self.invite_user_button = Button(text=self.tr.get('invite_button', 'Invite'), size_hint_x=None, width=60)
         self.invite_user_button.bind(on_press=self.show_invite_user_popup)
         group_actions_layout.add_widget(self.invite_user_button)
         self.invite_user_button.opacity = 0
         self.invite_user_button.disabled = True
 
-        self.group_call_button = Button(text='Call', size_hint_x=None, width=50)
+        self.group_call_button = Button(text=self.tr.get('call_button_short', 'Call'), size_hint_x=None, width=50)
         self.group_call_button.bind(on_press=self.start_group_call)
         group_actions_layout.add_widget(self.group_call_button)
         self.group_call_button.opacity = 0
         self.group_call_button.disabled = True
 
-        self.manage_group_button = Button(text='Manage', size_hint_x=None, width=70)
+        self.manage_group_button = Button(text=self.tr.get('manage_button', 'Manage'), size_hint_x=None, width=70)
         self.manage_group_button.bind(on_press=self.show_manage_group_popup)
         group_actions_layout.add_widget(self.manage_group_button)
         self.manage_group_button.opacity = 0
@@ -1780,7 +1878,7 @@ class VoiceChatApp(App):
                 
                 # For now, let's just check if we have any contacts.
                 if not self.contacts:
-                     self.show_popup("Cannot Send", "You must add a user as a contact before sending messages.")
+                     self.show_popup(self.tr.get('cannot_send_title', "Cannot Send"), self.tr.get('must_add_contact_message', "You must add a user as a contact before sending messages."))
                      return
 
                 for contact in self.contacts:
@@ -1799,7 +1897,7 @@ class VoiceChatApp(App):
                 self.server_manager.send_group_message(self.active_chat, message_data)
                 self.add_message_to_box(message_data, self.active_chat)
             else:
-                self.add_message_to_box("Cannot send global messages in server mode yet.", 'global')
+                self.add_message_to_box(self.tr.get('no_global_server_message', "Cannot send global messages in server mode yet."), 'global')
         elif self.mode == 'p2p_bluetooth' and self.bluetooth_manager:
             full_message = f"{self.username}: {text}"
             if self.bluetooth_manager.send_message(full_message):
@@ -1858,31 +1956,41 @@ class VoiceChatApp(App):
             self.request_contact(target_username)
             return
 
-        self.add_message_to_box(f"Initiating call to {target_username}...", 'global')
+        self.add_message_to_box(f"Calling {target_username}...", 'global')
         self.webrtc_manager.start_call(target_username)
-        self.show_call_popup(target_username)
 
     def hang_up_call(self, peer_username=None):
-        if not peer_username:
-            # If no specific peer, hang up all connections
-            for peer in list(self.webrtc_manager.peer_connections.keys()):
-                self.webrtc_manager.end_call(peer)
-                self.p2p_manager.send_webrtc_signal(peer, 'hangup', {})
-        else:
-            self.webrtc_manager.end_call(peer_username)
-            self.p2p_manager.send_webrtc_signal(peer_username, 'hangup', {})
+        # Guard against recursive calls from on_dismiss event
+        if getattr(self, '_is_hanging_up', False):
+            return
+        self._is_hanging_up = True
 
-        if self.call_popup:
-            self.call_popup.dismiss()
-            self.call_popup = None
-        self.add_message_to_box("Call ended.", 'global')
+        try:
+            if not peer_username:
+                # If no specific peer, hang up all connections
+                for peer in list(self.webrtc_manager.peer_connections.keys()):
+                    self.webrtc_manager.end_call(peer)
+                    if self.p2p_manager: self.p2p_manager.send_webrtc_signal(peer, 'hangup', {})
+            else:
+                self.webrtc_manager.end_call(peer_username)
+                if self.p2p_manager: self.p2p_manager.send_webrtc_signal(peer_username, 'hangup', {})
+
+            if self.call_popup:
+                # We must dismiss before setting to None, so the guard is necessary
+                self.call_popup.dismiss()
+                self.call_popup = None
+            self.add_message_to_box("Call ended.", 'global')
+        finally:
+            self._is_hanging_up = False
 
     @mainthread
     def on_webrtc_signal(self, sender, signal_type, data):
         if signal_type == 'offer':
             self.show_incoming_call_popup(sender, data)
         elif signal_type == 'answer':
+            self.add_message_to_box(f"Call with {sender} accepted and connected.", 'global')
             self.webrtc_manager.handle_answer(sender, data)
+            self.show_call_popup(sender) # Show call UI for initiator only after answer
         elif signal_type == 'hangup':
             self.webrtc_manager.end_call(sender)
             if self.call_popup:
@@ -2074,47 +2182,57 @@ class VoiceChatApp(App):
 
     @mainthread
     def on_peer_not_found(self, username):
-        self.show_popup("Search Failed", f"User '{username}' could not be found on the network.")
+        self.show_popup(self.tr.get('search_failed_title', "Search Failed"), self.tr.get('user_not_found_message', "User '{username}' could not be found on the network.", username=username))
 
     def request_contact(self, target_username):
-        config = self.config_manager.load_config()
-        p2p_password = config.get('security', {}).get('p2p_password', '')
-        
-        # We don't use the password-based encryption for the request itself,
-        # just a hash for verification on the other side.
-        password_hash = self.p2p_manager.encryption_manager.hash_password(p2p_password) if p2p_password else None
-        
-        self.p2p_manager.send_contact_request(target_username, password_hash)
+        # The password is now handled by the receiver. The sender just sends a plain request.
+        self.p2p_manager.send_contact_request(target_username)
         self.add_message_to_box(f"System: Contact request sent to '{target_username}'.", 'global')
 
     @mainthread
-    def on_incoming_contact_request(self, sender_username, password_hash):
+    def on_incoming_contact_request(self, sender_username, payload):
         config = self.config_manager.load_config()
         my_password = config.get('security', {}).get('p2p_password', '')
 
-        if my_password:
-            my_hash = self.p2p_manager.encryption_manager.hash_password(my_password)
-            if my_hash != password_hash:
-                print(f"Incoming contact request from {sender_username} with wrong password. Ignoring.")
-                return # Silently ignore
+        if not my_password:
+            # No password is set on our end, so show the simple accept/decline popup.
+            popup = ContactRequestPopup(sender_username, self.tr)
+            def handle_response(instance, accepted):
+                self.p2p_manager.send_contact_response(sender_username, accepted)
+                if accepted:
+                    self.contacts.add(sender_username)
+                    self.add_message_to_box(f"System: You are now contacts with {sender_username}.", 'global')
+            popup.bind(on_response=handle_response)
+            popup.open()
+        else:
+            # A password is required. Show the password prompt.
+            popup = PasswordPromptPopup(sender_username, self.tr)
+            def handle_password_submit(instance, entered_password):
+                if entered_password is None: # User cancelled
+                    self.p2p_manager.send_contact_response(sender_username, False)
+                    return
 
-        # Password matches or is not required, show popup.
-        popup = ContactRequestPopup(sender_username, self.tr)
-        def handle_response(instance, accepted):
-            self.p2p_manager.send_contact_response(sender_username, accepted)
-            if accepted:
-                self.contacts.add(sender_username)
-                self.add_message_to_box(f"System: You are now contacts with {sender_username}.", 'global')
-        popup.bind(on_response=handle_response)
-        popup.open()
+                my_hash = self.p2p_manager.encryption_manager.hash_password(my_password)
+                entered_hash = self.p2p_manager.encryption_manager.hash_password(entered_password)
+
+                if my_hash == entered_hash:
+                    self.p2p_manager.send_contact_response(sender_username, True)
+                    self.contacts.add(sender_username)
+                    self.add_message_to_box(f"System: You are now contacts with {sender_username}.", 'global')
+                else:
+                    self.show_popup("Password Incorrect", "The entered password was incorrect.")
+                    self.p2p_manager.send_contact_response(sender_username, False)
+
+            popup.bind(on_submit=handle_password_submit)
+            popup.open()
 
     @mainthread
     def on_contact_request_response(self, sender_username, accepted):
         if accepted:
             self.contacts.add(sender_username)
-            self.show_popup("Contact Added", f"'{sender_username}' accepted your contact request.")
+            self.show_popup(self.tr.get('contact_added_title', "Contact Added"), self.tr.get('contact_request_accepted_message', "'{sender_username}' accepted your contact request.", sender_username=sender_username))
         else:
-            self.show_popup("Request Declined", f"'{sender_username}' declined your contact request.")
+            self.show_popup(self.tr.get('request_declined_title', "Request Declined"), self.tr.get('contact_request_declined_message', "'{sender_username}' declined your contact request.", sender_username=sender_username))
 
     # --- History Sync Logic ---
     @mainthread
@@ -2131,12 +2249,12 @@ class VoiceChatApp(App):
     # --- Group Chat Logic ---
     def show_create_group_popup(self, instance):
         box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text="Enter group name:"))
+        box.add_widget(Label(text=self.tr.get('enter_group_name_label', "Enter group name:")))
         self.group_name_input = TextInput(multiline=False)
         box.add_widget(self.group_name_input)
-        ok_button = Button(text="Create")
+        ok_button = Button(text=self.tr.get('create_button', "Create"))
         box.add_widget(ok_button)
-        popup = AnimatedPopup(title="Create Group", content=box, size_hint=(0.8, 0.4))
+        popup = AnimatedPopup(title=self.tr.get('create_group_title', "Create Group"), content=box, size_hint=(0.8, 0.4))
         ok_button.bind(on_press=lambda x: self.create_group(popup))
         popup.open()
 
@@ -2180,7 +2298,7 @@ class VoiceChatApp(App):
             self.add_message_to_box(message_data, chat_id)
         # Update title or some indicator
         if chat_id == 'global':
-            Window.title = "Voice Chat"
+            Window.title = self.tr.get('window_title', "JustMessenger")
         else:
             if self.mode.startswith('p2p'):
                 group_info = self.p2p_manager.groups.get(chat_id, {})
@@ -2188,7 +2306,7 @@ class VoiceChatApp(App):
                 group_info = self.server_groups.get(chat_id, {})
             
             group_name = group_info.get('name', 'Group')
-            Window.title = f"Voice Chat - {group_name}"
+            Window.title = f"{self.tr.get('window_title', 'JustMessenger')} - {group_name}"
             is_admin = group_info.get('admin') == self.username
             
             is_admin = group_info.get('admin') == self.username
@@ -2216,14 +2334,14 @@ class VoiceChatApp(App):
     @mainthread
     def on_incoming_group_invite(self, group_id, group_name, admin_username):
         box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text=f"You are invited to join the group '{group_name}' by {admin_username}."))
+        box.add_widget(Label(text=self.tr.get('group_invite_message', "You are invited to join the group '{group_name}' by {admin_username}.", group_name=group_name, admin_username=admin_username)))
         btn_layout = BoxLayout(spacing=10)
-        yes_btn = Button(text='Accept')
-        no_btn = Button(text='Decline')
+        yes_btn = Button(text=self.tr.get('accept_button', 'Accept'))
+        no_btn = Button(text=self.tr.get('decline_button', 'Decline'))
         btn_layout.add_widget(yes_btn)
         btn_layout.add_widget(no_btn)
         box.add_widget(btn_layout)
-        popup = AnimatedPopup(title="Group Invitation", content=box, size_hint=(0.8, 0.5), auto_dismiss=False)
+        popup = AnimatedPopup(title=self.tr.get('group_invitation_title', "Group Invitation"), content=box, size_hint=(0.8, 0.5), auto_dismiss=False)
 
         def on_yes(inst):
             if self.mode.startswith('p2p'):
@@ -2255,7 +2373,7 @@ class VoiceChatApp(App):
     def show_invite_user_popup(self, instance):
         if self.mode.startswith('p2p'):
             if not self.p2p_manager or not self.p2p_manager.peers:
-                self.add_message_to_box("System: No users online to invite.", self.active_chat)
+                self.add_message_to_box(self.tr.get('no_users_to_invite_message', "System: No users online to invite."), self.active_chat)
                 return
             current_members = self.p2p_manager.groups.get(self.active_chat, {}).get('members', set())
             available_users = [u for u in self.p2p_manager.peers.keys() if u not in current_members]
@@ -2269,12 +2387,12 @@ class VoiceChatApp(App):
             return
 
         if not available_users:
-            self.add_message_to_box("System: All available users are already in the group.", self.active_chat)
+            self.add_message_to_box(self.tr.get('all_users_in_group_message', "System: All available users are already in the group."), self.active_chat)
             return
 
         box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text="Select a user to invite:"))
-        popup = AnimatedPopup(title="Invite User", content=box, size_hint=(0.6, 0.8))
+        box.add_widget(Label(text=self.tr.get('select_user_to_invite_label', "Select a user to invite:")))
+        popup = AnimatedPopup(title=self.tr.get('invite_user_title', "Invite User"), content=box, size_hint=(0.6, 0.8))
         for username in available_users:
             btn = Button(text=username)
             btn.bind(on_press=lambda x, u=username: self.invite_user(u, popup))
@@ -2461,7 +2579,7 @@ class VoiceChatApp(App):
         
         if kicked_username == self.username:
             # You have been kicked
-            self.show_popup("Kicked from Group", f"You have been kicked from the group '{self.p2p_manager.groups.get(group_id, {}).get('name')}' by {admin_username}.")
+            self.show_popup(self.tr.get('kicked_from_group_title', "Kicked from Group"), self.tr.get('you_were_kicked_message', "You have been kicked from the group '{group_name}' by {admin_username}.", group_name=self.p2p_manager.groups.get(group_id, {}).get('name'), admin_username=admin_username))
             
             if self.active_chat == group_id:
                 self.switch_chat('global') # Switch to global chat
@@ -2487,7 +2605,7 @@ class VoiceChatApp(App):
             else:
                 group_name = "Unknown Group"
 
-            self.show_popup("Kicked from Group", f"You have been kicked from the group '{group_name}' by {admin_username}.")
+            self.show_popup(self.tr.get('kicked_from_group_title', "Kicked from Group"), self.tr.get('you_were_kicked_message', "You have been kicked from the group '{group_name}' by {admin_username}.", group_name=group_name, admin_username=admin_username))
 
             if self.active_chat == group_id:
                 self.switch_chat('global')
@@ -2675,7 +2793,7 @@ class VoiceChatApp(App):
             # We might need to recreate the UI to apply language changes,
             # which is complex. For now, we'll just show a message.
             # A full implementation would require a restart or dynamic UI recreation.
-            self.show_popup("Language Changed", "The language will fully update on next restart.")
+            self.show_popup(self.tr.get('language_changed_title', "Language Changed"), self.tr.get('language_change_restart_message', "The language will fully update on next restart."))
             Window.title = self.tr.get('window_title') # Update title immediately
 
         self.config_manager.save_config(config)

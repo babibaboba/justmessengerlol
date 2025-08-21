@@ -113,6 +113,10 @@ class EncryptionManager:
             print(f"Error decrypting message from {username}: {e}")
             return None
 
+    def has_session_key(self, username):
+        """Checks if a session key is established for a given peer."""
+        return username in self.session_keys
+
     @staticmethod
     def hash_password(password):
         """Hashes a password using SHA256."""
