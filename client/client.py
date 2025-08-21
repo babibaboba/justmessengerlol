@@ -1390,6 +1390,8 @@ class SettingsPopup(AnimatedPopup):
 
 class VoiceChatApp(App):
     def build(self):
+        self.config_manager = ConfigManager()
+        self.tr = Translator(self.config_manager)
         self.icon = 'JustMessenger.png'
         # Register emoji font
         # Let's try to find a suitable emoji font
@@ -1414,8 +1416,6 @@ class VoiceChatApp(App):
         return RootLayout()
 
     def on_start(self):
-        self.config_manager = ConfigManager()
-        self.tr = Translator(self.config_manager)
         self.p2p_manager = None
         self.server_manager = None
         self.bluetooth_manager = None
