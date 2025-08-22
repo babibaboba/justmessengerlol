@@ -5,17 +5,18 @@ import uuid
 from functools import partial
 
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
+from kivymd.uix.button import MDRaisedButton, MDIconButton
 from kivy.uix.filechooser import FileChooserListView
-from kivy.uix.label import Label
+from kivymd.uix.label import MDLabel
 from kivy.uix.progressbar import ProgressBar
 from kivy.clock import mainthread
+from kivymd.uix.dialog import MDDialog
 
 # Assuming plugin_manager and its BasePlugin are discoverable
 # This might require adjusting sys.path, which the PluginManager does.
 from plugin_manager import BasePlugin
 # We also need the custom popup from the main app
-from client import AnimatedPopup
+from client import AnimatedPopup # Retaining for now, may switch to MDDialog
 
 
 # --- THREADS (Copied from client.py) ---
@@ -117,10 +118,10 @@ class FileSelectPopup(AnimatedPopup):
         except Exception:
             pass
         layout.add_widget(self.file_chooser)
-        btn_layout = BoxLayout(size_hint_y=None, height=44)
-        ok_btn = Button(text='Send')
+        btn_layout = BoxLayout(size_hint_y=None, height="44dp")
+        ok_btn = MDRaisedButton(text='Send')
         ok_btn.bind(on_press=self.send_file)
-        cancel_btn = Button(text='Cancel')
+        cancel_btn = MDRaisedButton(text='Cancel')
         cancel_btn.bind(on_press=self.dismiss)
         btn_layout.add_widget(ok_btn)
         btn_layout.add_widget(cancel_btn)
@@ -138,8 +139,8 @@ class FileTransferWidget(BoxLayout):
         self.orientation = 'vertical'
         self.size_hint_y = None
         self.height = 60
-        self.label = Label(text=text, size_hint_y=None, height=30)
-        self.progress_bar = ProgressBar(max=100, value=0, size_hint_y=None, height=30)
+        self.label = MDLabel(text=text, size_hint_y=None, height="30dp", halign="center")
+        self.progress_bar = ProgressBar(max=100, value=0, size_hint_y=None, height="30dp")
         self.add_widget(self.label)
         self.add_widget(self.progress_bar)
 
@@ -166,15 +167,12 @@ class FileTransferPlugin(BasePlugin):
 
         # Add the "Attach File" button to the main UI
         chat_ids = self.app.root.ids.chat_layout.ids
-        self.attach_button = Button(
-            text=self.app.tr.get('attach_button', '📎'),
-            font_name='EmojiFont', # Use the registered font alias
-            size_hint_x=None,
-            width=40
+        self.attach_button = MDIconButton(
+            icon="paperclip"
         )
         self.attach_button.bind(on_press=self.select_user_for_file_transfer)
         # Add it next to the send button, for example
-        chat_ids.input_layout.add_widget(self.attach_button, 2) # Adjust index based on new emoji button
+        chat_ids.input_layout.add_widget(self.attach_button, 2) # Adjust index
 
         # Register the button for theming
         if self.app.plugin_manager:
@@ -231,10 +229,10 @@ class FileTransferPlugin(BasePlugin):
             self.app.add_message_to_box("System: No users online to send a file to.", 'global')
             return
         box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text="Select a user:"))
+        box.add_widget(MDLabel(text="Select a user:"))
         popup = AnimatedPopup(title="Select User", content=box, size_hint=(0.6, 0.8))
         for username in self.app.p2p_manager.peers.keys():
-            btn = Button(text=username)
+            btn = MDRaisedButton(text=username)
             btn.bind(on_press=partial(self.user_selected_for_file, username, popup))
             box.add_widget(btn)
         popup.open()
@@ -260,7 +258,7 @@ class FileTransferPlugin(BasePlugin):
         # We have the filepath, now we need the target user.
         # Let's reuse the user selection popup logic.
         box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text="Select a user to send the dropped file to:"))
+        box.add_widget(MDLabel(text="Select a user to send the dropped file to:"))
         popup = AnimatedPopup(title="Select User", content=box, size_hint=(0.6, 0.8))
         
         def user_selected_for_dropped_file(username, popup, instance):
@@ -268,7 +266,7 @@ class FileTransferPlugin(BasePlugin):
             self.send_filepath(filepath, username)
 
         for username in self.app.p2p_manager.peers.keys():
-            btn = Button(text=username)
+            btn = MDRaisedButton(text=username)
             btn.bind(on_press=partial(user_selected_for_dropped_file, username, popup))
             box.add_widget(btn)
         
@@ -292,15 +290,23 @@ class FileTransferPlugin(BasePlugin):
             self.add_transfer_widget(transfer_id, f"Sending '{filename}' to {target_username}... (waiting)")
         except Exception as e:
             self.app.add_message_to_box(f"Error preparing file transfer: {e}", 'global')
+        
+        # After sending, if it's an audio message, delete it.
+        if "audio_messages" in filepath and filepath.endswith(".wav"):
+            try:
+                os.remove(filepath)
+                print(f"[{self.name}] Deleted temporary audio file: {filepath}")
+            except OSError as e:
+                print(f"[{self.name}] Error deleting audio file {filepath}: {e}")
 
     @mainthread
     def handle_incoming_file_request(self, sender_username, filename, filesize, ip, port):
         box = BoxLayout(orientation='vertical', spacing=10, padding=10)
         text = self.app.tr.get('file_transfer_request_text', username=sender_username, filename=filename, size=round(filesize / 1024, 2))
-        box.add_widget(Label(text=text))
-        btn_layout = BoxLayout(spacing=10)
-        yes_btn = Button(text='Accept')
-        no_btn = Button(text='Decline')
+        box.add_widget(MDLabel(text=text))
+        btn_layout = BoxLayout(spacing="10dp")
+        yes_btn = MDRaisedButton(text='Accept')
+        no_btn = MDRaisedButton(text='Decline')
         btn_layout.add_widget(yes_btn)
         btn_layout.add_widget(no_btn)
         box.add_widget(btn_layout)

@@ -21,32 +21,35 @@ import numpy as np
 
 
 # Kivy imports
-from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
+from kivymd.app import MDApp
+from kivymd.uix.boxlayout import MDBoxLayout
 import asyncio
 from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaRelay, MediaPlayer, MediaRecorder
-from kivy.uix.label import Label
-from kivy.uix.progressbar import ProgressBar
-from kivy.uix.button import Button
-from kivy.uix.textinput import TextInput
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.popup import Popup
+from aiortc.mediastreams import MediaStreamError, AudioStreamTrack
+from av import AudioFrame
+from kivymd.uix.label import MDLabel
+from kivymd.uix.progressbar import MDProgressBar
+from kivymd.uix.button import MDRaisedButton, MDIconButton, MDFlatButton
+from kivymd.uix.textfield import MDTextField
+from kivymd.uix.gridlayout import MDGridLayout
+from kivymd.uix.dialog import MDDialog
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.spinner import Spinner
-from kivy.uix.slider import Slider
-from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelHeader
-from kivy.uix.switch import Switch
+from kivymd.uix.slider import MDSlider
+from kivymd.uix.tab import MDTabs, MDTabsBase
+from kivymd.uix.selectioncontrol import MDSwitch
 from kivy.clock import mainthread, Clock
 from kivy.core.window import Window
 from kivy.graphics import Color, Rectangle
 from kivy.animation import Animation
 from kivy.core.audio import SoundLoader
 from kivy.core.text import LabelBase
+from kivymd.theming import ThemeManager
 from kivy.metrics import dp
+from kivymd.uix.menu import MDDropdownMenu
+from kivymd.uix.floatlayout import MDFloatLayout
 
 # --- Set borderless before anything else ---
-Window.borderless = False
+Window.borderless = True
 Window.size = (1000, 600)
 
 # Project imports
@@ -284,7 +287,8 @@ class HotkeyManager(threading.Thread):
 
 class AudioManager:
     """Manages all audio-related functionality like devices, recording, and playback."""
-    def __init__(self, callback_queue):
+    def __init__(self, app, callback_queue):
+        self.app = app
         self.callback_queue = callback_queue
         self.is_recording = False
         self.is_testing_mic = False
@@ -293,6 +297,17 @@ class AudioManager:
         self.recording_file = None
         self.input_volume = 1.0  # Gain factor from 0.0 to 1.0+
         self.output_volume = 1.0
+
+    def resample_and_frame(self, data, sample_rate, block_size):
+        pts = int(datetime.utcnow().timestamp() * 1000)
+        return AudioFrame(
+            channels=1,
+            data=data,
+            sample_rate=sample_rate,
+            sample_width=2, # 16-bit audio
+            timestamp=pts,
+            time_base='1/1000'
+        )
 
     def get_devices(self):
         """Returns a tuple of (input_devices, output_devices) dictionaries."""
@@ -365,8 +380,8 @@ class AudioManager:
         self.is_recording = False
         print("Recording stopped.")
 
-    def start_mic_test(self, device_index):
-        """Starts a microphone test, sending volume levels to the callback queue."""
+    def start_mic_test(self, input_device_index, output_device_index):
+        """Starts a microphone test with audio loopback and volume meter."""
         if self.is_testing_mic:
             return
 
@@ -374,22 +389,28 @@ class AudioManager:
         try:
             samplerate = 44100
             
-            def audio_callback(indata, frames, time, status):
+            def audio_callback(indata, outdata, frames, time, status):
                 if status:
                     print(status, file=sys.stderr)
-                # Apply input volume to the mic test data as well
+                
+                # Process input volume
                 processed_data = indata * self.input_volume
+                
+                # Loopback audio to output device
+                outdata[:] = processed_data
+                
+                # Update volume meter
                 volume_norm = np.linalg.norm(processed_data) * 10
                 self.callback_queue.put(('mic_level', min(1.0, volume_norm)))
 
-            self.mic_test_stream = sd.InputStream(
-                device=device_index,
-                channels=1,
+            self.mic_test_stream = sd.Stream(
+                device=(input_device_index, output_device_index),
                 samplerate=samplerate,
+                channels=1,
                 callback=audio_callback
             )
             self.mic_test_stream.start()
-            print("Mic test started.")
+            print("Mic loopback test started.")
         except Exception as e:
             print(f"Error starting mic test: {e}")
             self.is_testing_mic = False
@@ -404,7 +425,7 @@ class AudioManager:
             self.mic_test_stream.close()
             self.mic_test_stream = None
         self.is_testing_mic = False
-        print("Mic test stopped.")
+        print("Mic loopback test stopped.")
 
     def play_test_sound(self, device_index):
         """Plays a test sound on the specified output device."""
@@ -433,17 +454,133 @@ class AudioManager:
             self.output_volume = level
             print(f"Set output volume to {level}")
 
+class MicrophoneStreamTrack(AudioStreamTrack):
+    def __init__(self, audio_manager, device_index):
+        super().__init__()
+        self.audio_manager = audio_manager
+        self.device_index = device_index
+        self.audio_queue = asyncio.Queue()
+        self.stream = None
+        self.running = False
+        self.muted = False
+
+    def set_muted(self, muted):
+        """Sets the muted state of the track."""
+        self.muted = muted
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        
+        def audio_callback(indata, frames, time, status):
+            if status:
+                print(f"MicrophoneStreamTrack status: {status}")
+            try:
+                self.audio_queue.put_nowait(indata.tobytes())
+            except asyncio.QueueFull:
+                pass # Drop frames if the queue is full
+
+        self.stream = sd.RawInputStream(
+            samplerate=48000,
+            blocksize=960, # 20ms of audio at 48kHz
+            device=self.device_index,
+            channels=1,
+            dtype='int16',
+            callback=audio_callback
+        )
+        self.stream.start()
+        print("MicrophoneStreamTrack started.")
+
+    def stop(self):
+        if not self.running:
+            return
+        self.running = False
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+        print("MicrophoneStreamTrack stopped.")
+
+    async def recv(self):
+        if not self.running:
+            raise MediaStreamError
+
+        if self.muted:
+            # When muted, send a frame of silence.
+            # 960 samples * 2 bytes/sample (int16) = 1920 bytes
+            silent_data = b'\x00' * 1920
+            return self.audio_manager.resample_and_frame(silent_data, 48000, 960)
+
+        data = await self.audio_queue.get()
+        return self.audio_manager.resample_and_frame(data, 48000, 960)
+
+class AudioTrackPlayer:
+    def __init__(self, track, audio_manager, device_index):
+        self.track = track
+        self.audio_manager = audio_manager
+        self.device_index = device_index
+        self.stream = None
+        self.player_thread = None
+        self.running = False
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        
+        self.stream = sd.RawOutputStream(
+            samplerate=48000,
+            blocksize=960,
+            device=self.device_index,
+            channels=1,
+            dtype='int16'
+        )
+        self.stream.start()
+        
+        self.player_thread = threading.Thread(target=self.run, daemon=True)
+        self.player_thread.start()
+        print("AudioTrackPlayer started.")
+
+    def stop(self):
+        self.running = False
+        if self.player_thread:
+            self.player_thread.join()
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+        print("AudioTrackPlayer stopped.")
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def receive_frames():
+            while self.running:
+                try:
+                    frame = await self.track.recv()
+                    self.stream.write(frame.to_ndarray(format='s16', shape=(frame.samples, 1)))
+                except MediaStreamError:
+                    break
+                except Exception as e:
+                    print(f"Audio player error: {e}")
+                    break
+        
+        loop.run_until_complete(receive_frames())
+
 class WebRTCManager(threading.Thread):
-    def __init__(self, callback_queue):
+    def __init__(self, audio_manager, callback_queue):
         super().__init__(daemon=True)
+        self.audio_manager = audio_manager
         self.callback_queue = callback_queue
         self.loop = None
         self.peer_connections = {} # {peer_username: RTCPeerConnection}
-        self.audio_sender = {} # {peer_username: sender_track}
+        self.audio_players = {} # {peer_username: AudioTrackPlayer}
+        self.mic_track = None
         self.running = True
 
     def run(self):
-        """Runs the asyncio event loop in this dedicated thread."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         try:
@@ -454,66 +591,98 @@ class WebRTCManager(threading.Thread):
     def stop(self):
         self.running = False
         if self.loop:
+            future = asyncio.run_coroutine_threadsafe(self._shutdown(), self.loop)
+            future.result()
             self.loop.call_soon_threadsafe(self.loop.stop)
 
-    # --- Public methods to be called from other threads ---
-    
+    async def _shutdown(self):
+        if self.mic_track:
+            self.mic_track.stop()
+        for player in self.audio_players.values():
+            player.stop()
+        for pc in self.peer_connections.values():
+            await pc.close()
+
+    def set_mute(self, is_muted):
+        """Toggles mute on the microphone track."""
+        if self.mic_track:
+            # This is called from the main Kivy thread.
+            # The mic_track's muted flag is accessed from the asyncio thread in recv().
+            # A simple boolean flag assignment is atomic in Python, so this is thread-safe.
+            self.mic_track.set_muted(is_muted)
+
     async def _create_peer_connection(self, peer_username):
-        """Coroutine to create and configure a peer connection."""
         pc = RTCPeerConnection()
         self.peer_connections[peer_username] = pc
 
         @pc.on("track")
         async def on_track(track):
             print(f"Track {track.kind} received from {peer_username}")
-            # Here we would play the audio. This needs a player implementation.
             if track.kind == "audio":
-                # Kivy cannot play raw audio frames directly. We need a way to buffer
-                # and play this. This is a complex part of the integration.
-                self.callback_queue.put(('webrtc_audio_received', {'peer': peer_username, 'track': track}))
+                config = self.audio_manager.app.config_manager.load_config()
+                output_device_name = config.get('output_device_name', 'Default')
+                _, output_devices = self.audio_manager.get_devices()
+                device_index = output_devices.get(output_device_name, sd.default.device[1])
+                
+                player = AudioTrackPlayer(track, self.audio_manager, device_index)
+                self.audio_players[peer_username] = player
+                player.start()
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
             print(f"Connection state for {peer_username} is {pc.connectionState}")
-            if pc.connectionState == "failed":
-                await pc.close()
-                del self.peer_connections[peer_username]
+            if pc.connectionState in ["failed", "closed", "disconnected"]:
+                if peer_username in self.audio_players:
+                    self.audio_players[peer_username].stop()
+                    del self.audio_players[peer_username]
+                if pc.connectionState == "failed":
+                    await pc.close()
+                    if peer_username in self.peer_connections:
+                        del self.peer_connections[peer_username]
 
         return pc
 
+    def _start_mic(self):
+        if self.mic_track:
+            self.mic_track.stop()
+        
+        config = self.audio_manager.app.config_manager.load_config()
+        input_device_name = config.get('input_device_name', 'Default')
+        input_devices, _ = self.audio_manager.get_devices()
+        device_index = input_devices.get(input_device_name, sd.default.device[0])
+        
+        self.mic_track = MicrophoneStreamTrack(self.audio_manager, device_index)
+        self.mic_track.start()
+
     def start_call(self, peer_username):
-        """Initiates a call to a peer."""
         if not self.loop: return
         future = asyncio.run_coroutine_threadsafe(self._start_call(peer_username), self.loop)
         return future.result()
 
     async def _start_call(self, peer_username):
+        self._start_mic()
         pc = await self._create_peer_connection(peer_username)
-        
-        # Add local audio track
-        # This is a placeholder for getting microphone audio.
-        # It will be implemented properly later.
+        pc.addTrack(self.mic_track)
         
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
         
-        # The offer needs to be sent to the peer via the signaling channel (our P2PManager)
         sdp_offer = {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
         self.callback_queue.put(('webrtc_offer_created', {'peer': peer_username, 'offer': sdp_offer}))
 
     def handle_offer(self, peer_username, offer_sdp):
-        """Handles an incoming offer from a peer."""
         if not self.loop: return
         future = asyncio.run_coroutine_threadsafe(self._handle_offer(peer_username, offer_sdp), self.loop)
         return future.result()
 
     async def _handle_offer(self, peer_username, offer_sdp):
+        self._start_mic()
         pc = await self._create_peer_connection(peer_username)
         
         offer = RTCSessionDescription(sdp=offer_sdp["sdp"], type=offer_sdp["type"])
         await pc.setRemoteDescription(offer)
         
-        # Add local audio track (placeholder)
+        pc.addTrack(self.mic_track)
         
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
@@ -752,34 +921,56 @@ class ServerManager(threading.Thread):
 
 # --- Kivy Popups & Widgets ---
 
-class AnimatedPopup(Popup):
-    def open(self, *args, **kwargs):
-        self.scale = 0.8
-        self.opacity = 0
-        super().open(*args, **kwargs)
-        anim = Animation(scale=1, opacity=1, d=0.2, t='out_quad')
-        anim.start(self)
 
-class RootLayout(BoxLayout): pass
-class ChatLayout(BoxLayout): pass
-
-class CallPopup(AnimatedPopup):
-    def __init__(self, peer_username, translator, **kwargs):
+class TitleBar(MDBoxLayout):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.size_hint_y = None
+        self.height = dp(30)
+        self.bind(on_touch_down=self.on_touch_down_title)
+        self.bind(on_touch_move=self.on_touch_move_title)
+
+    def on_touch_down_title(self, instance, touch):
+        if self.collide_point(*touch.pos):
+            touch.grab(self)
+            self.start_pos = touch.pos
+            self.start_window_pos = Window.left, Window.top
+            return True
+
+    def on_touch_move_title(self, instance, touch):
+        if touch.grab_current is self:
+            dx = touch.x - self.start_pos[0]
+            dy = touch.y - self.start_pos[1]
+            Window.left = self.start_window_pos[0] + dx
+            Window.top = self.start_window_pos[1] + dy
+
+class RootLayout(MDBoxLayout): pass
+class ChatLayout(MDBoxLayout): pass
+
+class CallPopup(MDDialog):
+    def __init__(self, peer_username, translator, **kwargs):
         self.tr = translator
         self.is_muted = False
-        self.title = self.tr.get('call_title', 'Call')
-        self.size_hint = (0.6, 0.4)
-        self.auto_dismiss = False
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('call_label', peer_username=peer_username)))
-        self.mute_button = Button(text=self.tr.get('mute_button'))
+        
+        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
+        content_layout.bind(minimum_height=content_layout.setter('height'))
+        
+        content_layout.add_widget(MDLabel(text=self.tr.get('call_label', peer_username=peer_username), halign='center'))
+        
+        self.mute_button = MDRaisedButton(text=self.tr.get('mute_button'))
         self.mute_button.bind(on_press=self.toggle_mute)
-        layout.add_widget(self.mute_button)
-        hang_up_button = Button(text=self.tr.get('hang_up_button'))
-        hang_up_button.bind(on_press=self.hang_up)
-        layout.add_widget(hang_up_button)
-        self.content = layout
+        content_layout.add_widget(self.mute_button)
+        
+        super().__init__(
+            title=self.tr.get('call_title', 'Call'),
+            type="custom",
+            content_cls=content_layout,
+            buttons=[
+                MDRaisedButton(text=self.tr.get('hang_up_button'), on_release=self.hang_up)
+            ],
+            auto_dismiss=False,
+            **kwargs
+        )
         self.register_event_type('on_mute_toggle')
 
     def toggle_mute(self, instance):
@@ -793,25 +984,20 @@ class CallPopup(AnimatedPopup):
     def on_mute_toggle(self, is_muted):
         pass
 
-class ContactRequestPopup(AnimatedPopup):
+class ContactRequestPopup(MDDialog):
     def __init__(self, username, translator, **kwargs):
-        super().__init__(**kwargs)
         self.tr = translator
-        self.title = self.tr.get('contact_request_title', 'Contact Request')
-        self.size_hint = (0.7, 0.4)
-        self.auto_dismiss = False
-
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('contact_request_text', username=username)))
         
-        btn_layout = BoxLayout(spacing=10)
-        accept_btn = Button(text=self.tr.get('accept_button', 'Accept'))
-        decline_btn = Button(text=self.tr.get('decline_button', 'Decline'))
-        btn_layout.add_widget(accept_btn)
-        btn_layout.add_widget(decline_btn)
-        layout.add_widget(btn_layout)
+        accept_btn = MDRaisedButton(text=self.tr.get('accept_button', 'Accept'))
+        decline_btn = MDFlatButton(text=self.tr.get('decline_button', 'Decline'))
         
-        self.content = layout
+        super().__init__(
+            title=self.tr.get('contact_request_title', 'Contact Request'),
+            text=self.tr.get('contact_request_text', username=username),
+            buttons=[accept_btn, decline_btn],
+            auto_dismiss=False,
+            **kwargs
+        )
         
         accept_btn.bind(on_press=self.accept)
         decline_btn.bind(on_press=self.decline)
@@ -832,98 +1018,118 @@ class ContactRequestPopup(AnimatedPopup):
 # The EmojiPopup class is no longer needed and will be removed.
 # The functionality will be integrated into the main app class.
 
-class PasswordPromptPopup(AnimatedPopup):
-   def __init__(self, username, translator, **kwargs):
-       super().__init__(**kwargs)
-       self.tr = translator
-       self.title = self.tr.get('password_prompt_title', 'Password Required')
-       self.size_hint = (0.7, 0.5)
-       self.auto_dismiss = False
-
-       layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-       layout.add_widget(Label(text=self.tr.get('password_prompt_text', username=username)))
-       
-       self.password_input = TextInput(multiline=False, password=True)
-       layout.add_widget(self.password_input)
-       
-       btn_layout = BoxLayout(spacing=10)
-       ok_btn = Button(text=self.tr.get('ok_button', 'OK'))
-       cancel_btn = Button(text=self.tr.get('cancel_button', 'Cancel'))
-       btn_layout.add_widget(ok_btn)
-       btn_layout.add_widget(cancel_btn)
-       layout.add_widget(btn_layout)
-       
-       self.content = layout
-       
-       ok_btn.bind(on_press=self.submit)
-       cancel_btn.bind(on_press=self.cancel)
-       
-       self.register_event_type('on_submit')
-
-   def submit(self, instance):
-       self.dispatch('on_submit', self.password_input.text)
-       self.dismiss()
-
-   def cancel(self, instance):
-       self.dispatch('on_submit', None) # Indicate cancellation
-       self.dismiss()
-
-   def on_submit(self, password):
-       pass
-
-class GroupCallPopup(AnimatedPopup):
-    # Placeholder for now
-    def __init__(self, group_name, translator, **kwargs):
-        super().__init__(**kwargs)
+class PasswordPromptPopup(MDDialog):
+    def __init__(self, username, translator, **kwargs):
         self.tr = translator
-        self.title = self.tr.get('group_call_title', group_name=group_name)
-        self.size_hint = (0.7, 0.6)
-        self.auto_dismiss = False
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        self.participants_list = BoxLayout(orientation='vertical')
-        layout.add_widget(Label(text=self.tr.get('participants_label', 'Participants:')))
-        layout.add_widget(self.participants_list)
-        hang_up_button = Button(text=self.tr.get('hang_up_button'))
+        
+        self.password_input = MDTextField(multiline=False, password=True, hint_text="Password")
+        
+        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
+        content_layout.add_widget(MDLabel(text=self.tr.get('password_prompt_text', username=username)))
+        content_layout.add_widget(self.password_input)
+        content_layout.height = "120dp" # Adjust height for content
+
+        ok_btn = MDRaisedButton(text=self.tr.get('ok_button', 'OK'))
+        cancel_btn = MDFlatButton(text=self.tr.get('cancel_button', 'Cancel'))
+
+        super().__init__(
+            title=self.tr.get('password_prompt_title', 'Password Required'),
+            type="custom",
+            content_cls=content_layout,
+            buttons=[ok_btn, cancel_btn],
+            auto_dismiss=False,
+            **kwargs
+        )
+        
+        ok_btn.bind(on_press=self.submit)
+        cancel_btn.bind(on_press=self.cancel)
+        
+        self.register_event_type('on_submit')
+
+    def submit(self, instance):
+        self.dispatch('on_submit', self.password_input.text)
+        self.dismiss()
+
+    def cancel(self, instance):
+        self.dispatch('on_submit', None) # Indicate cancellation
+        self.dismiss()
+
+    def on_submit(self, password):
+        pass
+
+class GroupCallPopup(MDDialog):
+    def __init__(self, group_name, translator, **kwargs):
+        self.tr = translator
+        
+        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
+        content_layout.bind(minimum_height=content_layout.setter('height'))
+        content_layout.add_widget(MDLabel(text=self.tr.get('participants_label', 'Participants:'), halign='center'))
+        self.participants_list = MDBoxLayout(orientation='vertical', size_hint_y=None)
+        self.participants_list.bind(minimum_height=self.participants_list.setter('height'))
+        content_layout.add_widget(self.participants_list)
+        
+        hang_up_button = MDRaisedButton(text=self.tr.get('hang_up_button'))
         hang_up_button.bind(on_press=self.hang_up)
-        layout.add_widget(hang_up_button)
-        self.content = layout
+        
+        super().__init__(
+            title=self.tr.get('group_call_title', group_name=group_name),
+            type="custom",
+            content_cls=content_layout,
+            buttons=[hang_up_button],
+            auto_dismiss=False,
+            **kwargs
+        )
 
     def hang_up(self, instance):
         self.dismiss()
 
 
-class ManageGroupPopup(AnimatedPopup):
+class ManageGroupPopup(MDDialog):
     def __init__(self, translator, members, **kwargs):
-        super().__init__(**kwargs)
         self.tr = translator
-        self.title = self.tr.get('manage_group_title', 'Manage Group')
-        self.size_hint = (0.7, 0.8)
-        
-        layout = BoxLayout(orientation='vertical', spacing=5, padding=10)
-        
-        scroll_view = ScrollView()
-        scroll_content = BoxLayout(orientation='vertical', size_hint_y=None, spacing=5)
+        self.members = members
+        self.register_event_type('on_kick_user')
+        self.register_event_type('on_invite_user')
+
+        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
+        content_layout.bind(minimum_height=content_layout.setter('height'))
+
+        scroll_view = ScrollView(size_hint_y=None, height="300dp")
+        scroll_content = MDBoxLayout(orientation='vertical', size_hint_y=None, spacing="5dp")
         scroll_content.bind(minimum_height=scroll_content.setter('height'))
-        
-        for member in members:
-            member_layout = BoxLayout(size_hint_y=None, height=40)
-            member_label = Label(text=member)
-            kick_button = Button(text=self.tr.get('kick_button', 'Kick'), size_hint_x=None, width=80)
+
+        for member in self.members:
+            member_layout = MDBoxLayout(size_hint_y=None, height=dp(40))
+            member_label = MDLabel(text=member)
+            kick_button = MDRaisedButton(text=self.tr.get('kick_button', 'Kick'), size_hint_x=None, width=dp(80))
             kick_button.bind(on_press=partial(self.kick_user, member))
-            
             member_layout.add_widget(member_label)
             member_layout.add_widget(kick_button)
             scroll_content.add_widget(member_layout)
-            
+
         scroll_view.add_widget(scroll_content)
-        layout.add_widget(scroll_view)
-        
-        close_button = Button(text=self.tr.get('close_button', 'Close'), size_hint_y=None, height=44)
-        close_button.bind(on_press=self.dismiss)
-        layout.add_widget(close_button)
-        
-        self.content = layout
-        self.register_event_type('on_kick_user')
+        content_layout.add_widget(scroll_view)
+
+        invite_button = MDRaisedButton(text=self.tr.get('invite_button', 'Invite'))
+        invite_button.bind(on_press=self.invite_user)
+
+        close_button = MDFlatButton(text=self.tr.get('close_button', 'Close'))
+        close_button.bind(on_press=lambda x: self.dismiss())
+
+        super().__init__(
+            title=self.tr.get('manage_group_title', 'Manage Group'),
+            type="custom",
+            content_cls=content_layout,
+            buttons=[invite_button, close_button],
+            **kwargs
+        )
+
+    def invite_user(self, instance):
+        self.dispatch('on_invite_user')
+        self.dismiss()
+
+    def on_invite_user(self):
+        pass
 
     def kick_user(self, username, instance):
         self.dispatch('on_kick_user', username)
@@ -933,17 +1139,18 @@ class ManageGroupPopup(AnimatedPopup):
         pass
 
 
-class AudioMessageWidget(BoxLayout):
-    def __init__(self, filepath, sender, **kwargs):
+class AudioMessageWidget(MDBoxLayout):
+    def __init__(self, filepath, sender, tr, **kwargs):
         super().__init__(**kwargs)
+        self.tr = tr
         self.filepath = filepath
         self.sound = SoundLoader.load(filepath)
         self.orientation = 'horizontal'
         self.size_hint_y = None
-        self.height = 40
+        self.height = dp(40)
         
-        self.label = Label(text=self.tr.get('audio_from_sender', sender=sender))
-        self.play_button = Button(text=self.tr.get('play_button_play', '▶️ Play'), size_hint_x=None, width=100, font_name='EmojiFont')
+        self.label = MDLabel(text=self.tr.get('audio_from_sender', "Audio from {sender}", sender=sender))
+        self.play_button = MDIconButton(icon='play')
         self.play_button.bind(on_press=self.toggle_play)
         
         self.add_widget(self.label)
@@ -954,58 +1161,64 @@ class AudioMessageWidget(BoxLayout):
             return
         if self.sound.state == 'play':
             self.sound.stop()
-            self.play_button.text = self.tr.get('play_button_play', '▶️ Play')
+            self.play_button.icon = 'play'
         else:
             self.sound.play()
-            self.play_button.text = self.tr.get('play_button_pause', '⏸️ Pause')
+            self.play_button.icon = 'pause'
             self.sound.bind(on_stop=self.on_sound_stop)
 
     def on_sound_stop(self, instance):
-        self.play_button.text = self.tr.get('play_button_play', '▶️ Play')
+        self.play_button.icon = 'play'
 
 
-class ModeSelectionPopup(AnimatedPopup):
+class ModeSelectionPopup(MDDialog):
     def __init__(self, translator, **kwargs):
-        super().__init__(**kwargs)
         self.tr = translator
-        self.title = self.tr.get('mode_selection_title')
-        self.size_hint = (0.6, 0.5)
-        self.auto_dismiss = False
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('mode_selection_label')))
-        p2p_internet_button = Button(text=self.tr.get('mode_p2p_internet'))
-        p2p_internet_button.bind(on_press=lambda x: self.select_mode('p2p_internet'))
-        layout.add_widget(p2p_internet_button)
-        p2p_local_button = Button(text=self.tr.get('mode_p2p_local'))
-        p2p_local_button.bind(on_press=lambda x: self.select_mode('p2p_local'))
-        layout.add_widget(p2p_local_button)
-        p2p_bluetooth_button = Button(text=self.tr.get('mode_p2p_bluetooth', 'P2P (Bluetooth)'))
-        p2p_bluetooth_button.bind(on_press=lambda x: self.select_mode('p2p_bluetooth'))
-        layout.add_widget(p2p_bluetooth_button)
-        server_button = Button(text=self.tr.get('mode_client_server'))
-        server_button.bind(on_press=lambda x: self.select_mode('server'))
-        layout.add_widget(server_button)
-        self.content = layout
+        self.mode = None
 
-    def select_mode(self, mode):
+        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
+        content_layout.bind(minimum_height=content_layout.setter('height'))
+        content_layout.add_widget(MDLabel(text=self.tr.get('mode_selection_label'), halign='center'))
+
+        modes = {
+            'p2p_internet': self.tr.get('mode_p2p_internet'),
+            'p2p_local': self.tr.get('mode_p2p_local'),
+            'p2p_bluetooth': self.tr.get('mode_p2p_bluetooth', 'P2P (Bluetooth)'),
+            'server': self.tr.get('mode_client_server')
+        }
+
+        for mode_id, mode_text in modes.items():
+            btn = MDRaisedButton(text=mode_text)
+            btn.bind(on_press=partial(self.select_mode, mode_id))
+            content_layout.add_widget(btn)
+
+        super().__init__(
+            title=self.tr.get('mode_selection_title'),
+            type="custom",
+            content_cls=content_layout,
+            auto_dismiss=False,
+            **kwargs
+        )
+
+    def select_mode(self, mode, instance):
         self.mode = mode
         self.dismiss()
 
-class UsernamePopup(AnimatedPopup):
+class UsernamePopup(MDDialog):
     def __init__(self, translator, current_username, **kwargs):
-        super().__init__(**kwargs)
         self.tr = translator
-        self.title = self.tr.get('username_dialog_title')
-        self.size_hint = (0.8, 0.4)
-        self.auto_dismiss = False
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('username_dialog_label')))
-        self.username_input = TextInput(text=current_username, multiline=False)
-        layout.add_widget(self.username_input)
-        ok_button = Button(text=self.tr.get('ok_button', 'OK'))
+        self.username_input = MDTextField(text=current_username, multiline=False, hint_text=self.tr.get('username_dialog_label'))
+        ok_button = MDRaisedButton(text=self.tr.get('ok_button', 'OK'))
+        
+        super().__init__(
+            title=self.tr.get('username_dialog_title'),
+            type="custom",
+            content_cls=self.username_input,
+            buttons=[ok_button],
+            auto_dismiss=False,
+            **kwargs
+        )
         ok_button.bind(on_press=self.validate_username)
-        layout.add_widget(ok_button)
-        self.content = layout
 
     def validate_username(self, instance):
         username = self.username_input.text.strip()
@@ -1013,34 +1226,33 @@ class UsernamePopup(AnimatedPopup):
             self.username = username
             self.dismiss()
 
-class ServerLoginPopup(AnimatedPopup):
+class ServerLoginPopup(MDDialog):
     def __init__(self, translator, config, **kwargs):
-        super().__init__(**kwargs)
         self.tr = translator
-        self.title = self.tr.get('server_login_title', 'Connect to Server')
-        self.size_hint = (0.8, 0.6)
-        self.auto_dismiss = False
-        
         server_config = config.get('server', {})
         
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('server_ip_label', 'Server IP:')))
-        self.ip_input = TextInput(text=server_config.get('host', '127.0.0.1'), multiline=False)
-        layout.add_widget(self.ip_input)
+        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
+        content_layout.height = "200dp"
         
-        layout.add_widget(Label(text=self.tr.get('server_port_label', 'Server Port:')))
-        self.port_input = TextInput(text=str(server_config.get('port', 12345)), multiline=False)
-        layout.add_widget(self.port_input)
+        self.ip_input = MDTextField(text=server_config.get('host', '127.0.0.1'), hint_text=self.tr.get('server_ip_label', 'Server IP:'))
+        self.port_input = MDTextField(text=str(server_config.get('port', 12345)), hint_text=self.tr.get('server_port_label', 'Server Port:'))
+        self.password_input = MDTextField(text='', password=True, hint_text=self.tr.get('server_password_label', 'Password (optional):'))
         
-        layout.add_widget(Label(text=self.tr.get('server_password_label', 'Password (optional):')))
-        self.password_input = TextInput(text='', multiline=False, password=True)
-        layout.add_widget(self.password_input)
+        content_layout.add_widget(self.ip_input)
+        content_layout.add_widget(self.port_input)
+        content_layout.add_widget(self.password_input)
         
-        connect_button = Button(text=self.tr.get('connect_button', 'Connect'))
+        connect_button = MDRaisedButton(text=self.tr.get('connect_button', 'Connect'))
+        
+        super().__init__(
+            title=self.tr.get('server_login_title', 'Connect to Server'),
+            type="custom",
+            content_cls=content_layout,
+            buttons=[connect_button],
+            auto_dismiss=False,
+            **kwargs
+        )
         connect_button.bind(on_press=self.connect)
-        layout.add_widget(connect_button)
-        
-        self.content = layout
 
     def connect(self, instance):
         self.server_ip = self.ip_input.text.strip()
@@ -1058,228 +1270,215 @@ class ServerLoginPopup(AnimatedPopup):
             # Maybe show an error label
             pass
 
-class SettingsPopup(AnimatedPopup):
+class SettingsTab(MDBoxLayout, MDTabsBase):
+    pass
+
+class SettingsPopup(MDDialog):
     def __init__(self, translator, config, app, **kwargs):
-        super().__init__(**kwargs)
-        self.app = app # Store the app instance
+        self.app = app
         self.tr = translator
         self.config = config
-        self.title = self.tr.get('settings_title', 'Settings')
-        self.size_hint = (0.8, 0.9)
-        self.auto_dismiss = False
         self.new_hotkey = set()
         self.recording = False
         self.listener = None
         self.is_testing = False
-        self.test_sound = None
         self.saved = False
-
+        self.language_menu = None
+        self.input_device_menu = None
+        self.output_device_menu = None
+        
         # --- Main Layout ---
-        main_layout = BoxLayout(orientation='vertical', spacing=5, padding=10)
+        content_layout = MDBoxLayout(orientation='vertical', size_hint_y=None)
+        content_layout.bind(minimum_height=content_layout.setter('height'))
         
-        # --- Tabbed Panel for Settings ---
-        tab_panel = TabbedPanel(do_default_tab=False)
-        
-        # --- General Tab ---
-        general_tab = TabbedPanelHeader(text=self.tr.get('general_tab', 'General'))
-        general_tab.content = self.create_general_tab()
-        tab_panel.add_widget(general_tab)
-        
-        # --- Hotkeys Tab ---
-        hotkeys_tab = TabbedPanelHeader(text=self.tr.get('hotkeys_tab', 'Hotkeys'))
-        hotkeys_tab.content = self.create_hotkeys_tab()
-        tab_panel.add_widget(hotkeys_tab)
+        tab_panel = MDTabs()
+        tab_panel.add_widget(self.create_general_tab())
+        tab_panel.add_widget(self.create_hotkeys_tab())
+        tab_panel.add_widget(self.create_audio_tab())
+        tab_panel.add_widget(self.create_security_tab())
+        tab_panel.add_widget(self.create_plugins_tab())
+        content_layout.add_widget(tab_panel)
 
-        # --- Audio Tab ---
-        audio_tab = TabbedPanelHeader(text=self.tr.get('audio_tab', 'Audio'))
-        audio_tab.content = self.create_audio_tab()
-        tab_panel.add_widget(audio_tab)
-
-        # --- Security Tab ---
-        security_tab = TabbedPanelHeader(text=self.tr.get('security_tab', 'Security'))
-        security_tab.content = self.create_security_tab()
-        tab_panel.add_widget(security_tab)
-
-        # --- Plugins Tab ---
-        plugins_tab = TabbedPanelHeader(text=self.tr.get('plugins_tab', 'Plugins'))
-        plugins_tab.content = self.create_plugins_tab()
-        tab_panel.add_widget(plugins_tab)
-
-        main_layout.add_widget(tab_panel)
-
-        # --- Action Buttons ---
-        btn_layout = BoxLayout(size_hint_y=None, height=44, spacing=10)
-        save_btn = Button(text=self.tr.get('save_button'))
+        save_btn = MDRaisedButton(text=self.tr.get('save_button'))
         save_btn.bind(on_press=self.save_and_dismiss)
-        cancel_btn = Button(text=self.tr.get('cancel_button', 'Cancel'))
+        cancel_btn = MDFlatButton(text=self.tr.get('cancel_button', 'Cancel'))
         cancel_btn.bind(on_press=self.cancel_and_dismiss)
-        btn_layout.add_widget(save_btn)
-        btn_layout.add_widget(cancel_btn)
-        main_layout.add_widget(btn_layout)
-        
-        self.content = main_layout
+
+        super().__init__(
+            title=self.tr.get('settings_title', 'Settings'),
+            type="custom",
+            content_cls=content_layout,
+            buttons=[save_btn, cancel_btn],
+            auto_dismiss=False,
+            **kwargs
+        )
         
     def create_general_tab(self):
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('language_label', 'Language'), font_size='18sp'))
+        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
+        layout.add_widget(MDLabel(text=self.tr.get('language_label', 'Language'), font_style='H6'))
 
-        # Get available languages from the translator
-        available_languages = {
-            'en': 'English',
-            'ru': 'Русский'
-        }
-        
+        available_languages = {'en': 'English', 'ru': 'Русский'}
         current_lang_code = self.app.tr.get_language()
         current_lang_name = available_languages.get(current_lang_code, 'English')
+        
+        self.language_button = MDRaisedButton(text=current_lang_name)
+        self.language_button.bind(on_release=self.open_language_menu)
+        layout.add_widget(self.language_button)
+        
+        menu_items = [
+            {"text": name, "viewclass": "OneLineListItem", "on_release": lambda x=code: self.set_language(x)}
+            for code, name in available_languages.items()
+        ]
+        self.language_menu = MDDropdownMenu(caller=self.language_button, items=menu_items, width_mult=4)
+        self.selected_language = current_lang_code
 
-        self.language_spinner = Spinner(
-            text=current_lang_name,
-            values=list(available_languages.values())
-        )
-        self.language_spinner.available_languages = available_languages # Store map
-        layout.add_widget(self.language_spinner)
+        layout.add_widget(MDBoxLayout()) # Spacer
         
-        layout.add_widget(Label(text="")) # Spacer
-        
-        return_button = Button(text=self.tr.get('return_to_main_menu_button', 'Return to Main Menu'), size_hint_y=None, height=44)
+        return_button = MDRaisedButton(text=self.tr.get('return_to_main_menu_button', 'Return to Main Menu'), size_hint_y=None, height=dp(44))
         return_button.bind(on_press=self.app.return_to_main_menu)
         layout.add_widget(return_button)
         
-        return layout
+        return SettingsTab(layout, title=self.tr.get('general_tab', 'General'))
+
+    def open_language_menu(self, button):
+        self.language_menu.open()
+
+    def set_language(self, lang_code):
+        self.selected_language = lang_code
+        self.language_button.text = self.language_menu.items[0]['text'] if lang_code == 'en' else self.language_menu.items[1]['text']
+        self.language_menu.dismiss()
 
     def create_hotkeys_tab(self):
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('hotkey_settings_title', 'Mute Hotkey'), font_size='18sp'))
+        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
+        layout.add_widget(MDLabel(text=self.tr.get('hotkey_settings_title', 'Mute Hotkey'), font_style='H6'))
         current_hotkey_str = self.config.get('hotkeys', {}).get('mute', 'ctrl+m')
-        layout.add_widget(Label(text=self.tr.get('hotkey_mute_label')))
-        self.hotkey_label = Label(text=current_hotkey_str)
+        layout.add_widget(MDLabel(text=self.tr.get('hotkey_mute_label')))
+        self.hotkey_label = MDLabel(text=current_hotkey_str)
         layout.add_widget(self.hotkey_label)
-        self.record_button = Button(text=self.tr.get('hotkey_record_button'))
+        self.record_button = MDRaisedButton(text=self.tr.get('hotkey_record_button'))
         self.record_button.bind(on_press=self.toggle_record)
         layout.add_widget(self.record_button)
-        return layout
+        return SettingsTab(layout, title=self.tr.get('hotkeys_tab', 'Hotkeys'))
 
     def create_audio_tab(self):
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('audio_settings_title', 'Audio Settings'), font_size='18sp'))
+        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
+        layout.add_widget(MDLabel(text=self.tr.get('audio_settings_title', 'Audio Settings'), font_style='H6'))
 
-        # --- Device Selection ---
         input_devices, output_devices = self.app.audio_manager.get_devices()
-        
-        layout.add_widget(Label(text=self.tr.get('input_device_label', 'Input Device (Microphone)')))
-        self.input_device_spinner = Spinner(
-            values=list(input_devices.keys()),
-            text=self.config.get('input_device_name', 'Default')
-        )
-        self.input_device_spinner.bind(text=self.on_device_change)
-        layout.add_widget(self.input_device_spinner)
-
-        layout.add_widget(Label(text=self.tr.get('output_device_label', 'Output Device (Speakers)')))
-        self.output_device_spinner = Spinner(
-            values=list(output_devices.keys()),
-            text=self.config.get('output_device_name', 'Default')
-        )
-        layout.add_widget(self.output_device_spinner)
-
-        # Store the mapping from display name to device index
         self.input_device_map = input_devices
         self.output_device_map = output_devices
 
-        # --- Volume Controls ---
-        layout.add_widget(Label(text=self.tr.get('input_volume_label', 'Input Volume')))
-        raw_input_vol = self.config.get('input_volume', 80)
-        input_vol = float(raw_input_vol if raw_input_vol is not None else 80)
-        self.input_volume_slider = Slider(min=0, max=100, value=input_vol)
+        layout.add_widget(MDLabel(text=self.tr.get('input_device_label', 'Input Device (Microphone)')))
+        self.input_device_button = MDRaisedButton(text=self.config.get('input_device_name', 'Default'))
+        self.input_device_button.bind(on_release=self.open_input_device_menu)
+        layout.add_widget(self.input_device_button)
+        
+        input_menu_items = [{"text": name, "viewclass": "OneLineListItem", "on_release": lambda x=name: self.set_input_device(x)} for name in input_devices.keys()]
+        self.input_device_menu = MDDropdownMenu(caller=self.input_device_button, items=input_menu_items, width_mult=4)
+
+        layout.add_widget(MDLabel(text=self.tr.get('output_device_label', 'Output Device (Speakers)')))
+        self.output_device_button = MDRaisedButton(text=self.config.get('output_device_name', 'Default'))
+        self.output_device_button.bind(on_release=self.open_output_device_menu)
+        layout.add_widget(self.output_device_button)
+
+        output_menu_items = [{"text": name, "viewclass": "OneLineListItem", "on_release": lambda x=name: self.set_output_device(x)} for name in output_devices.keys()]
+        self.output_device_menu = MDDropdownMenu(caller=self.output_device_button, items=output_menu_items, width_mult=4)
+
+        layout.add_widget(MDLabel(text=self.tr.get('input_volume_label', 'Input Volume')))
+        self.input_volume_slider = MDSlider(min=0, max=100, value=self.config.get('input_volume', 80))
         layout.add_widget(self.input_volume_slider)
 
-        layout.add_widget(Label(text=self.tr.get('output_volume_label', 'Output Volume')))
-        raw_output_vol = self.config.get('output_volume', 80)
-        output_vol = float(raw_output_vol if raw_output_vol is not None else 80)
-        self.output_volume_slider = Slider(min=0, max=100, value=output_vol)
+        layout.add_widget(MDLabel(text=self.tr.get('output_volume_label', 'Output Volume')))
+        self.output_volume_slider = MDSlider(min=0, max=100, value=self.config.get('output_volume', 80))
         layout.add_widget(self.output_volume_slider)
 
-        # --- Mic Test ---
-        test_layout = BoxLayout(spacing=10, size_hint_y=None, height=44)
-        self.mic_test_button = Button(text=self.tr.get('mic_test_button', 'Test Microphone'))
+        test_layout = MDBoxLayout(spacing="10dp", size_hint_y=None, height=dp(44))
+        self.mic_test_button = MDRaisedButton(text=self.tr.get('mic_test_button', 'Test Microphone'))
         self.mic_test_button.bind(on_press=self.toggle_mic_test)
-        self.mic_level_bar = ProgressBar(max=1.0, value=0, size_hint_x=1.5)
+        self.mic_level_bar = MDProgressBar(max=1.0, value=0, size_hint_x=1.5)
         test_layout.add_widget(self.mic_test_button)
         test_layout.add_widget(self.mic_level_bar)
         layout.add_widget(test_layout)
         
-        # --- Speaker Test ---
-        speaker_test_button = Button(text=self.tr.get('speaker_test_button', 'Test Speakers'), size_hint_y=None, height=44)
+        speaker_test_button = MDRaisedButton(text=self.tr.get('speaker_test_button', 'Test Speakers'), size_hint_y=None, height=dp(44))
         speaker_test_button.bind(on_press=self.test_speakers)
         layout.add_widget(speaker_test_button)
 
-        return layout
-    
-    def on_device_change(self, spinner, text):
-        # If a mic test is running, stop and restart it with the new device
+        return SettingsTab(layout, title=self.tr.get('audio_tab', 'Audio'))
+
+    def open_input_device_menu(self, button):
+        self.input_device_menu.open()
+
+    def set_input_device(self, device_name):
+        self.input_device_button.text = device_name
+        self.input_device_menu.dismiss()
+        self.on_device_change()
+        
+    def open_output_device_menu(self, button):
+        self.output_device_menu.open()
+        
+    def set_output_device(self, device_name):
+        self.output_device_button.text = device_name
+        self.output_device_menu.dismiss()
+
+    def on_device_change(self):
         if self.is_testing:
             self.app.audio_manager.stop_mic_test()
-            device_name = self.input_device_spinner.text
-            device_index = self.input_device_map.get(device_name, sd.default.device[0])
-            self.app.audio_manager.start_mic_test(device_index)
+            input_device_index = self.input_device_map.get(self.input_device_button.text, sd.default.device[0])
+            output_device_index = self.output_device_map.get(self.output_device_button.text, sd.default.device[1])
+            self.app.audio_manager.start_mic_test(input_device_index, output_device_index)
 
     def toggle_mic_test(self, instance):
         self.is_testing = not self.is_testing
         if self.is_testing:
             self.mic_test_button.text = self.tr.get('mic_test_stop_button', 'Stop Test')
-            device_name = self.input_device_spinner.text
-            device_index = self.input_device_map.get(device_name, sd.default.device[0]) # Default input
-            self.app.audio_manager.start_mic_test(device_index)
+            input_device_index = self.input_device_map.get(self.input_device_button.text, sd.default.device[0])
+            output_device_index = self.output_device_map.get(self.output_device_button.text, sd.default.device[1])
+            self.app.audio_manager.start_mic_test(input_device_index, output_device_index)
         else:
             self.mic_test_button.text = self.tr.get('mic_test_button', 'Test Microphone')
             self.app.audio_manager.stop_mic_test()
             self.mic_level_bar.value = 0
 
     def test_speakers(self, instance):
-        device_name = self.output_device_spinner.text
-        device_index = self.output_device_map.get(device_name, sd.default.device[1]) # Default output
-        # Run in a thread so it doesn't block the UI
+        device_index = self.output_device_map.get(self.output_device_button.text, sd.default.device[1])
         threading.Thread(target=self.app.audio_manager.play_test_sound, args=(device_index,), daemon=True).start()
 
     def create_security_tab(self):
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        layout.add_widget(Label(text=self.tr.get('p2p_password_label', 'P2P Connection Password'), font_size='18sp'))
-        layout.add_widget(Label(text=self.tr.get('p2p_password_desc', 'Require a password for incoming P2P connections.')))
-        self.p2p_password_input = TextInput(
+        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
+        layout.add_widget(MDLabel(text=self.tr.get('p2p_password_label', 'P2P Connection Password'), font_style='H6'))
+        layout.add_widget(MDLabel(text=self.tr.get('p2p_password_desc', 'Require a password for incoming P2P connections.')))
+        self.p2p_password_input = MDTextField(
             text=self.config.get('security', {}).get('p2p_password', ''),
-            multiline=False,
             password=True
         )
         layout.add_widget(self.p2p_password_input)
-        return layout
+        return SettingsTab(layout, title=self.tr.get('security_tab', 'Security'))
 
     def create_plugins_tab(self):
-        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
         scroll_view = ScrollView()
-        scroll_content = GridLayout(cols=1, size_hint_y=None, spacing=10)
+        scroll_content = MDGridLayout(cols=1, size_hint_y=None, spacing="10dp")
         scroll_content.bind(minimum_height=scroll_content.setter('height'))
 
-        self.plugin_switches = {} # To hold references to the switches
-
+        self.plugin_switches = {}
         if self.app.plugin_manager and self.app.plugin_manager.plugins:
             for plugin in self.app.plugin_manager.plugins:
-                plugin_layout = BoxLayout(size_hint_y=None, height=60)
-                
-                info_layout = BoxLayout(orientation='vertical')
-                info_layout.add_widget(Label(text=plugin['name'], font_size='16sp', halign='left', valign='top'))
-                info_layout.add_widget(Label(text=plugin['description'], font_size='12sp', color=(0.7,0.7,0.7,1), halign='left', valign='top'))
-                
-                switch = Switch(active=plugin['enabled'])
+                plugin_layout = MDBoxLayout(size_hint_y=None, height=dp(60))
+                info_layout = MDBoxLayout(orientation='vertical')
+                info_layout.add_widget(MDLabel(text=plugin['name'], font_style='Subtitle1'))
+                info_layout.add_widget(MDLabel(text=plugin['description'], font_style='Caption', theme_text_color="Secondary"))
+                switch = MDSwitch(active=plugin['enabled'])
                 self.plugin_switches[plugin['id']] = switch
-
                 plugin_layout.add_widget(info_layout)
                 plugin_layout.add_widget(switch)
                 scroll_content.add_widget(plugin_layout)
         else:
-            scroll_content.add_widget(Label(text=self.tr.get('no_plugins_found', 'No plugins found.')))
+            scroll_content.add_widget(MDLabel(text=self.tr.get('no_plugins_found', 'No plugins found.')))
 
         scroll_view.add_widget(scroll_content)
         layout.add_widget(scroll_view)
-        return layout
+        return SettingsTab(layout, title=self.tr.get('plugins_tab', 'Plugins'))
 
     def toggle_record(self, instance):
         self.recording = not self.recording
@@ -1313,25 +1512,14 @@ class SettingsPopup(AnimatedPopup):
 
     def save_and_dismiss(self, instance):
         self.stop_listener()
-        if self.is_testing: # Stop mic test if it's running
+        if self.is_testing:
             self.toggle_mic_test(None)
-        
         self.hotkey = self.new_hotkey
         self.saved = True
         
-        # --- Save General Settings ---
-        selected_lang_name = self.language_spinner.text
-        # Find the language code from the name
-        lang_code = 'en' # default
-        for code, name in self.language_spinner.available_languages.items():
-            if name == selected_lang_name:
-                lang_code = code
-                break
-        self.config['language'] = lang_code
-        
-        # --- Save Audio Settings ---
-        self.config['input_device_name'] = self.input_device_spinner.text
-        self.config['output_device_name'] = self.output_device_spinner.text
+        self.config['language'] = self.selected_language
+        self.config['input_device_name'] = self.input_device_button.text
+        self.config['output_device_name'] = self.output_device_button.text
         self.config['input_volume'] = self.input_volume_slider.value
         self.config['output_volume'] = self.output_volume_slider.value
 
@@ -1339,30 +1527,21 @@ class SettingsPopup(AnimatedPopup):
             self.config['security'] = {}
         self.config['security']['p2p_password'] = self.p2p_password_input.text
 
-        # --- Handle Plugin Enable/Disable ---
         restart_required = False
         if hasattr(self, 'plugin_switches'):
             for plugin in self.app.plugin_manager.plugins:
                 plugin_id = plugin['id']
                 switch = self.plugin_switches.get(plugin_id)
-                if switch is None:
-                    continue
-
-                is_currently_enabled = plugin['enabled']
-                should_be_enabled = switch.active
-
-                if is_currently_enabled != should_be_enabled:
+                if switch is None: continue
+                if plugin['enabled'] != switch.active:
                     restart_required = True
                     py_file_path = os.path.join(plugin['path'], f"{plugin['module_name']}.py")
                     disabled_py_file_path = py_file_path + '.disabled'
-
                     try:
-                        if should_be_enabled and os.path.exists(disabled_py_file_path):
+                        if switch.active and os.path.exists(disabled_py_file_path):
                             os.rename(disabled_py_file_path, py_file_path)
-                            print(f"Enabled plugin: {plugin['name']}")
-                        elif not should_be_enabled and os.path.exists(py_file_path):
+                        elif not switch.active and os.path.exists(py_file_path):
                             os.rename(py_file_path, disabled_py_file_path)
-                            print(f"Disabled plugin: {plugin['name']}")
                     except Exception as e:
                         print(f"Error changing plugin state for {plugin['name']}: {e}")
 
@@ -1371,7 +1550,6 @@ class SettingsPopup(AnimatedPopup):
                 self.tr.get('restart_required_title', 'Restart Required'),
                 self.tr.get('restart_required_message', 'Plugin changes will take effect after restarting the application.')
             )
-        
         self.dismiss()
 
     def cancel_and_dismiss(self, instance):
@@ -1380,39 +1558,46 @@ class SettingsPopup(AnimatedPopup):
 
     @staticmethod
     def key_to_str(key):
-        if isinstance(key, keyboard.Key):
-            return key.name
-        elif isinstance(key, keyboard.KeyCode):
-            return key.char
+        if isinstance(key, keyboard.Key): return key.name
+        elif isinstance(key, keyboard.KeyCode): return key.char
         return str(key)
 
 
 
-class VoiceChatApp(App):
+class VoiceChatApp(MDApp):
     def build(self):
         self.config_manager = ConfigManager()
         self.tr = Translator(self.config_manager)
         self.icon = 'JustMessenger.png'
-        # Register emoji font
-        # Let's try to find a suitable emoji font
-        font_paths = [
-            'C:/Windows/Fonts/seguiemj.ttf',
-            '/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf', # Linux
-            '/System/Library/Fonts/Apple Color Emoji.ttc' # macOS
-        ]
-        found_font = None
-        for font in font_paths:
-            if os.path.exists(font):
-                found_font = font
-                break
         
-        if found_font:
-            print(f"Emoji font found at: {found_font}")
-            LabelBase.register(name='EmojiFont', fn_regular=found_font)
-        else:
-            print("WARNING: No system emoji font found. Emojis will likely not render.")
-            # Using a basic font as a fallback.
-            LabelBase.register(name='EmojiFont', fn_regular='Roboto')
+        # KivyMD Theme Setup
+        self.theme_cls.theme_style = "Dark" # Or "Light"
+        self.theme_cls.primary_palette = "Purple"
+        self.theme_cls.accent_palette = "Gray"
+        
+        # Register custom fonts
+        fonts_path = "./fonts/"
+        LabelBase.register(
+            name="Roboto",
+            fn_regular=os.path.join(fonts_path, "Roboto-Regular.ttf"),
+            fn_bold=os.path.join(fonts_path, "Roboto-Bold.ttf")
+        )
+        LabelBase.register(
+            name="NotoSans",
+            fn_regular=os.path.join(fonts_path, "NotoSans-Regular.ttf")
+        )
+        LabelBase.register(
+            name="EmojiFont",
+            fn_regular=os.path.join(fonts_path, "NotoColorEmoji.ttf")
+        )
+        
+        self.theme_cls.font_styles["Regular"] = [
+            "Roboto",
+            16,
+            False,
+            0.15,
+        ]
+
         return RootLayout()
 
     def on_start(self):
@@ -1430,8 +1615,8 @@ class VoiceChatApp(App):
         self.pending_call_target = None
         self.negotiated_rate = None
         self.callback_queue = queue.Queue()
-        self.audio_manager = AudioManager(self.callback_queue)
-        self.webrtc_manager = WebRTCManager(self.callback_queue)
+        self.audio_manager = AudioManager(self, self.callback_queue)
+        self.webrtc_manager = WebRTCManager(self.audio_manager, self.callback_queue)
         self.hotkey_manager = HotkeyManager()
         self.is_muted = False
         self.plugin_manager = None
@@ -1446,11 +1631,6 @@ class VoiceChatApp(App):
         self.initialized = False
         self.active_chat = 'global' # Can be 'global' or a group_id
         
-        self.themes = {
-            'light': {'bg': [1,1,1,1], 'text': [0,0,0,1], 'panel_bg': [0.9,0.9,0.9,1], 'input_bg': [1,1,1,1], 'button_bg': [0.8,0.8,0.8,1], 'button_text': [0,0,0,1], 'title_bar_bg': [0.7,0.7,0.7,1]},
-            'dark': {'bg': [0.1,0.1,0.1,1], 'text': [1,1,1,1], 'panel_bg': [0.15,0.15,0.15,1], 'input_bg': [0.2,0.2,0.2,1], 'button_bg': [0.3,0.3,0.3,1], 'button_text': [1,1,1,1], 'title_bar_bg': [0.25,0.25,0.25,1]}
-        }
-        self.current_theme = 'light'
 
         Clock.schedule_interval(self.process_callbacks, 0.1)
         Window.bind(on_request_close=self.on_request_close, on_dropfile=self.on_file_drop)
@@ -1616,40 +1796,38 @@ class VoiceChatApp(App):
         # Programmatically add Create Group button
         group_actions_layout = chat_ids.group_actions_layout
         
-        self.create_group_button = Button(text='+', size_hint_x=None, width=40)
+        self.create_group_button = MDIconButton(icon='plus', pos_hint={'center_y': 0.5})
         self.create_group_button.bind(on_press=self.show_create_group_popup)
         group_actions_layout.add_widget(self.create_group_button)
 
-        self.invite_user_button = Button(text=self.tr.get('invite_button', 'Invite'), size_hint_x=None, width=60)
-        self.invite_user_button.bind(on_press=self.show_invite_user_popup)
-        group_actions_layout.add_widget(self.invite_user_button)
-        self.invite_user_button.opacity = 0
-        self.invite_user_button.disabled = True
+        # Context-sensitive buttons
+        self.primary_context_button = MDRaisedButton(size_hint_x=1)
+        self.secondary_context_button = MDRaisedButton(size_hint_x=None, width=dp(80))
+        
+        group_actions_layout.add_widget(self.primary_context_button)
+        group_actions_layout.add_widget(self.secondary_context_button)
 
-        self.group_call_button = Button(text=self.tr.get('call_button_short', 'Call'), size_hint_x=None, width=50)
-        self.group_call_button.bind(on_press=self.start_group_call)
-        group_actions_layout.add_widget(self.group_call_button)
-        self.group_call_button.opacity = 0
-        self.group_call_button.disabled = True
-
-        self.manage_group_button = Button(text=self.tr.get('manage_button', 'Manage'), size_hint_x=None, width=70)
-        self.manage_group_button.bind(on_press=self.show_manage_group_popup)
-        group_actions_layout.add_widget(self.manage_group_button)
-        self.manage_group_button.opacity = 0
-        self.manage_group_button.disabled = True
+        # Store handlers to unbind them later
+        self._primary_context_handler = None
+        self._secondary_context_handler = None
+        
+        # Hide them initially
+        self.primary_context_button.opacity = 0
+        self.primary_context_button.disabled = True
+        self.secondary_context_button.opacity = 0
+        self.secondary_context_button.disabled = True
 
         # --- P2P User Search (Internet Mode Only) ---
         if self.mode == 'p2p_internet':
-            search_layout = BoxLayout(size_hint_y=None, height=80, spacing=10, padding=(5, 10))
-            self.search_user_input = TextInput(
+            search_layout = MDBoxLayout(size_hint_y=None, height=80, spacing=10, padding=(5, 10))
+            self.search_user_input = MDTextField(
                 hint_text=self.tr.get('search_user_hint', 'Find user...'),
                 multiline=False,
-                font_size='20sp'
+                mode="fill"
             )
-            search_button = Button(
+            search_button = MDRaisedButton(
                 text=self.tr.get('search_button', 'Find'),
-                size_hint_x=0.4,
-                font_size='20sp'
+                size_hint_x=0.4
             )
             search_button.bind(on_press=self.find_p2p_user)
             search_layout.add_widget(self.search_user_input)
@@ -1666,7 +1844,7 @@ class VoiceChatApp(App):
         
         config = self.config_manager.load_config()
         self.init_hotkeys()
-        self.apply_theme()
+        # self.apply_theme() is removed
         self.apply_audio_settings(config) # Apply saved audio settings
         self.root.opacity = 1
         
@@ -1756,11 +1934,11 @@ class VoiceChatApp(App):
         self.add_message_to_box(self.tr.get('bt_mode_start'), 'global')
         
         # Add a scan button
-        self.scan_bt_button = Button(text=self.tr.get('scan_bt_button', 'Scan for Devices'), size_hint_x=1, height=44, size_hint_y=None)
+        self.scan_bt_button = MDRaisedButton(text=self.tr.get('scan_bt_button', 'Scan for Devices'), size_hint_x=1, height=dp(44), size_hint_y=None)
         self.scan_bt_button.bind(on_press=self.scan_for_bt_devices)
         # Add to the main vertical controls layout
         self.root.ids.chat_layout.ids.users_panel_controls.add_widget(self.scan_bt_button)
-        self.apply_theme() # To style the new button
+        # self.apply_theme() is removed
 
     def scan_for_bt_devices(self, instance):
         self.add_message_to_box(self.tr.get('bt_scanning'), 'global')
@@ -1770,96 +1948,18 @@ class VoiceChatApp(App):
 
 
     def toggle_theme(self, instance):
-        self.current_theme = 'dark' if self.current_theme == 'light' else 'light'
-        self.apply_theme()
-
-    def _apply_windows_title_bar_theme(self):
-        """Applies the selected theme to the native Windows title bar."""
-        if sys.platform != 'win32':
-            return # This is a Windows-only feature
-
-        try:
-            import ctypes
-            from kivy.core.window import Window
-            
-            # Use Window.hwnd, available after the window is created.
-            hwnd = getattr(Window, 'hwnd', None)
-            if not hwnd:
-                print("Could not get window handle (hwnd) for theming.")
-                return
-
-            # DWMWA_USE_IMMERSIVE_DARK_MODE attribute for dark title bar
-            # Should work for Windows 10 (1903+) and Windows 11
-            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-            
-            value = ctypes.c_int(1 if self.current_theme == 'dark' else 0)
-            
-            result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                ctypes.byref(value),
-                ctypes.sizeof(value)
-            )
-            
-            if result != 0:
-                print(f"DwmSetWindowAttribute failed with HRESULT: {result}")
-        except Exception as e:
-            print(f"Failed to set native title bar theme: {e}")
-
-    def apply_theme(self):
-        theme = self.themes[self.current_theme]
-        chat_ids = self.root.ids.chat_layout.ids
-        Window.clearcolor = theme['bg']
-        set_bg(self.root, theme['bg'])
-        set_bg(chat_ids.chat_panel, theme['panel_bg'])
-        set_bg(chat_ids.users_panel, theme['panel_bg'])
-        chat_ids.users_list_label.color = theme['text']
-        chat_ids.msg_entry.background_color = theme['input_bg']
-        chat_ids.msg_entry.foreground_color = theme['text']
-        for button_id in ['send_button', 'record_button', 'emoji_button', 'theme_button', 'settings_button']:
-            if button_id in chat_ids: # Check if button exists (e.g. attach_button is now in a plugin)
-                chat_ids[button_id].background_color = theme['button_bg']
-                chat_ids[button_id].color = theme['button_text']
-        if hasattr(self, 'scan_bt_button'):
-            self.scan_bt_button.background_color = theme['button_bg']
-            self.scan_bt_button.color = theme['button_text']
-        self.create_group_button.background_color = theme['button_bg']
-        self.create_group_button.color = theme['button_text']
-        self.invite_user_button.background_color = theme['button_bg']
-        self.invite_user_button.color = theme['button_text']
-        self.group_call_button.background_color = theme['button_bg']
-        self.group_call_button.color = theme['button_text']
-        self.manage_group_button.background_color = theme['button_bg']
-        self.manage_group_button.color = theme['button_text']
-        if hasattr(self, 'search_user_input') and self.search_user_input:
-            self.search_user_input.background_color = theme['input_bg']
-            self.search_user_input.foreground_color = theme['text']
-            if self.search_user_input.parent:
-                search_layout = self.search_user_input.parent
-                # Find the button, it's not always the first child
-                search_button = next((child for child in search_layout.children if isinstance(child, Button)), None)
-                if search_button:
-                    search_button.background_color = theme['button_bg']
-                    search_button.color = theme['button_text']
-        for child in chat_ids.chat_box.children:
-            if isinstance(child, Label):
-                child.color = theme['text']
-        for child in chat_ids.users_list.children:
-            if isinstance(child, Button):
-                child.background_color = theme['button_bg']
-                child.color = theme['button_text']
-        
-        # Apply theme to registered plugin widgets
-        if self.plugin_manager:
-            for widget in self.plugin_manager.themed_widgets:
-                if isinstance(widget, Button):
-                    widget.background_color = theme['button_bg']
-                    widget.color = theme['button_text']
-        
-        # Also apply the theme to the native title bar on Windows
-        # Schedule the native title bar theme to apply after one frame
-        # to ensure the window handle (hwnd) is available.
-        Clock.schedule_once(lambda dt: self._apply_windows_title_bar_theme(), 0)
+        if self.theme_cls.theme_style == "Dark":
+            self.theme_cls.theme_style = "Light"
+            # As per user request: light violet/white-gray
+            self.theme_cls.primary_palette = "Purple"
+            self.theme_cls.primary_hue = "200" # Lighter shade
+            self.theme_cls.theme_style_switch_animation = True
+        else:
+            self.theme_cls.theme_style = "Dark"
+            # As per user request: dark violet/grey
+            self.theme_cls.primary_palette = "Purple"
+            self.theme_cls.primary_hue = "500" # Standard shade
+            self.theme_cls.theme_style_switch_animation = True
 
     def send_message(self, instance=None):
         text = self.root.ids.chat_layout.ids.msg_entry.text.strip()
@@ -1867,30 +1967,27 @@ class VoiceChatApp(App):
             return
         message_data = {'id': str(uuid.uuid4()), 'sender': self.username, 'text': text, 'timestamp': datetime.now().isoformat()}
         if self.mode.startswith('p2p') and self.p2p_manager:
+            # Determine if the active chat is a group
+            is_group = self.active_chat in self.p2p_manager.groups
+            
             if self.active_chat == 'global':
-                # In P2P global, we don't broadcast to everyone, but send to contacts.
-                # For now, let's assume sending a global message requires a contact request first
-                # to the first peer found if no contacts exist. This is complex.
-                # A simpler model: you can only message people from your user list (who are contacts).
-                # Let's stick to the user's request: to write to someone, they must agree.
-                # This implies we can't broadcast to non-contacts.
-                # We will modify this to send to all contacts.
-                
-                # For now, let's just check if we have any contacts.
+                # Broadcast to all established contacts in 'global' chat
                 if not self.contacts:
-                     self.show_popup(self.tr.get('cannot_send_title', "Cannot Send"), self.tr.get('must_add_contact_message', "You must add a user as a contact before sending messages."))
-                     return
+                    self.show_popup(self.tr.get('cannot_send_title', "Cannot Send"), self.tr.get('must_add_contact_message', "You must add a user as a contact before sending messages."))
+                    return
+                # We can't broadcast to global, so we will send to all contacts instead
+                for contact_user in self.contacts:
+                    self.p2p_manager.send_private_message(contact_user, message_data)
+                self.add_message_to_box(message_data, 'global') # Show in our own global chat
 
-                for contact in self.contacts:
-                     # This is not ideal, broadcast_message sends to all peers.
-                     # We need a send_private_message method. Let's add it later.
-                     # For now, we will use the existing broadcast and add a check on the receiving end.
-                     pass # Placeholder
-
-                self.p2p_manager.broadcast_message(message_data) # This will go to everyone for now
-                self.add_message_to_box(message_data, 'global')
-            else: # It's a group chat
+            elif is_group:
+                # Send a message to a specific group
                 self.p2p_manager.send_group_message(self.active_chat, message_data)
+                self.add_message_to_box(message_data, self.active_chat)
+            
+            else:
+                # It's a private message to a specific user (self.active_chat holds the username)
+                self.p2p_manager.send_private_message(self.active_chat, message_data)
                 self.add_message_to_box(message_data, self.active_chat)
         elif self.mode == 'server' and self.server_manager:
             if self.active_chat != 'global':
@@ -1906,7 +2003,7 @@ class VoiceChatApp(App):
                 self.add_message_to_box(self.tr.get('bt_not_connected'), 'global')
 
         self.root.ids.chat_layout.ids.msg_entry.text = ""
-        self.root.ids.chat_layout.ids.msg_entry.focus = True
+        Clock.schedule_once(lambda dt: setattr(self.root.ids.chat_layout.ids.msg_entry, 'focus', True))
 
     # --- Audio Message Logic ---
     def toggle_audio_message_record(self, instance):
@@ -1914,7 +2011,7 @@ class VoiceChatApp(App):
         chat_ids = self.root.ids.chat_layout.ids
         
         if self.is_recording_audio_message:
-            chat_ids.record_button.text = "⏹️" # Stop icon
+            chat_ids.record_button.icon = "stop"
             config = self.config_manager.load_config()
             device_name = config.get('input_device_name', 'Default')
             input_devices, _ = self.audio_manager.get_devices()
@@ -1931,19 +2028,32 @@ class VoiceChatApp(App):
                 self.is_recording_audio_message = False
                 chat_ids.record_button.text = "🎤" # Reset button
         else:
-            chat_ids.record_button.text = "🎤" # Reset button
+            chat_ids.record_button.icon = "microphone"
             self.audio_manager.stop_recording()
             self.add_message_to_box(f"System: Recording saved. Ready to send.", self.active_chat)
             
             # Create the audio widget and add it to the chat
-            widget = AudioMessageWidget(self.audio_message_path, self.username)
+            widget = AudioMessageWidget(self.audio_message_path, self.username, self.tr)
             self.root.ids.chat_layout.ids.chat_box.add_widget(widget)
             
-            # TODO: Send the audio file to peers. This requires file transfer logic.
-            # For now, it's only local.
+            # Send the recorded audio file to the other users in the chat.
+            ft_plugin = self.plugin_manager.get_plugin_by_id('file_transfer')
+            if ft_plugin and ft_plugin['instance']:
+                recipients = []
+                if self.mode.startswith('p2p') and self.p2p_manager and self.active_chat in self.p2p_manager.groups:
+                    recipients = self.p2p_manager.groups[self.active_chat].get('members', [])
+                elif self.mode == 'server' and self.server_manager and self.active_chat in self.server_groups:
+                    recipients = self.server_groups[self.active_chat].get('members', [])
+
+                for user in recipients:
+                    if user != self.username:
+                        print(f"Sending audio message to {user}")
+                        ft_plugin['instance'].send_filepath(self.audio_message_path, user)
+            
+            # The local audio widget serves as confirmation for the sender.
+            # The receiver will get a standard file transfer request.
             message_data = {'id': str(uuid.uuid4()), 'sender': self.username, 'audio_path': self.audio_message_path, 'timestamp': datetime.now().isoformat()}
             self.chat_history.setdefault(self.active_chat, []).append(message_data)
-            # self.p2p_manager.send_group_message(self.active_chat, message_data)
 
 
     # --- Call Logic ---
@@ -2011,16 +2121,15 @@ class VoiceChatApp(App):
             self.p2p_manager.send_webrtc_signal(peer_username, 'busy', {})
             return
 
-        box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text=self.tr.get('incoming_call_from', peer=peer_username)))
-        btn_layout = BoxLayout(spacing=10)
-        accept_btn = Button(text=self.tr.get('accept_button'))
-        decline_btn = Button(text=self.tr.get('decline_button'))
-        btn_layout.add_widget(accept_btn)
-        btn_layout.add_widget(decline_btn)
-        box.add_widget(btn_layout)
+        accept_btn = MDRaisedButton(text=self.tr.get('accept_button'))
+        decline_btn = MDFlatButton(text=self.tr.get('decline_button'))
         
-        popup = AnimatedPopup(title=self.tr.get('incoming_call_title'), content=box, size_hint=(0.7, 0.4), auto_dismiss=False)
+        popup = MDDialog(
+            title=self.tr.get('incoming_call_title'),
+            text=self.tr.get('incoming_call_from', peer=peer_username),
+            buttons=[accept_btn, decline_btn],
+            auto_dismiss=False
+        )
 
         def accept(instance):
             popup.dismiss()
@@ -2048,7 +2157,7 @@ class VoiceChatApp(App):
         
         def on_mute(instance, is_muted):
             self.is_muted = is_muted
-            # TODO: Add actual mute logic for WebRTC here in self.webrtc_manager
+            self.webrtc_manager.set_mute(is_muted)
             self.add_message_to_box(f"Mute is now {'ON' if is_muted else 'OFF'}", 'global')
 
         self.call_popup.bind(on_dismiss=on_hang_up)
@@ -2065,10 +2174,8 @@ class VoiceChatApp(App):
             return # Don't display if not in active chat
 
         chat_box = self.root.ids.chat_layout.ids.chat_box
-        theme = self.themes[self.current_theme]
-        
         font_size = '15sp' # Default font size
-        label_height = 30 # Default height
+        label_height = dp(30) # Default height
         
         if isinstance(message_data, str):
             display_text = message_data
@@ -2101,16 +2208,16 @@ class VoiceChatApp(App):
         if is_all_emoji and 1 <= len(emoji_list) <= 3:
             if len(emoji_list) == 1:
                 font_size = '48sp'
-                label_height = 60
+                label_height = dp(60)
             elif len(emoji_list) == 2:
                 font_size = '36sp'
-                label_height = 50
+                label_height = dp(50)
             elif len(emoji_list) == 3:
                 font_size = '28sp'
-                label_height = 40
+                label_height = dp(40)
         # --- End Emoji Size Logic ---
 
-        label = Label(text=display_text, size_hint_y=None, height=label_height, halign='left', valign='top', color=theme['text'], opacity=0, font_size=font_size, font_name='EmojiFont')
+        label = MDLabel(text=display_text, size_hint_y=None, height=label_height, halign='left', valign='top', opacity=0, font_size=font_size, theme_text_color="Primary")
         label.bind(width=lambda *x: label.setter('text_size')(label, (label.width, None)))
         chat_box.add_widget(label)
         anim = Animation(opacity=1, d=0.3)
@@ -2127,12 +2234,11 @@ class VoiceChatApp(App):
         if username == self.username:
             return
         users_list = self.root.ids.chat_layout.ids.users_list
-        theme = self.themes[self.current_theme]
         for child in users_list.children:
-            if isinstance(child, Button) and child.text.startswith(username):
+            if isinstance(child, MDRaisedButton) and child.text.startswith(username):
                 return
-        user_button = Button(text=username, size_hint_y=None, height=40, background_color=theme['button_bg'], color=theme['button_text'])
-        user_button.bind(on_press=lambda x, u=username: self.initiate_call(u))
+        user_button = MDRaisedButton(text=username, size_hint_y=None, height=dp(40))
+        user_button.bind(on_press=lambda x, u=username: self.switch_chat(u))
         users_list.add_widget(user_button)
         self.add_message_to_box(f"System: '{username}' is online.", 'global')
 
@@ -2142,16 +2248,15 @@ class VoiceChatApp(App):
         
         # Simple redraw: clear and add all
         # A more efficient implementation would diff the lists
-        for child in [c for c in users_list.children if isinstance(c, Button) and not c.text.startswith('[GROUP]')]:
+        for child in [c for c in users_list.children if isinstance(c, MDRaisedButton) and not c.text.startswith('[GROUP]')]:
              users_list.remove_widget(child)
 
-        theme = self.themes[self.current_theme]
         for username in users:
             if username == self.username:
                 continue
-            user_button = Button(text=username, size_hint_y=None, height=40, background_color=theme['button_bg'], color=theme['button_text'])
-            # In server mode, clicking a user could open a private chat later
-            # user_button.bind(on_press=lambda x, u=username: self.initiate_call(u))
+            user_button = MDRaisedButton(text=username, size_hint_y=None, height=dp(40))
+            # In server mode, clicking a user will open a private chat
+            user_button.bind(on_press=lambda x, u=username: self.switch_chat(u))
             users_list.add_widget(user_button)
 
     @mainthread
@@ -2159,7 +2264,7 @@ class VoiceChatApp(App):
         users_list = self.root.ids.chat_layout.ids.users_list
         widget_to_remove = None
         for child in users_list.children:
-            if isinstance(child, Button) and child.text.startswith(username):
+            if isinstance(child, MDRaisedButton) and child.text.startswith(username):
                 widget_to_remove = child
                 break
         if widget_to_remove:
@@ -2171,7 +2276,7 @@ class VoiceChatApp(App):
         self.add_message_to_box(f"System: Secure connection established with {username}.", 'global')
         users_list = self.root.ids.chat_layout.ids.users_list
         for child in users_list.children:
-            if isinstance(child, Button) and child.text == username:
+            if isinstance(child, MDRaisedButton) and child.text == username:
                 child.text = f"{username} (Secure)"
                 break
 
@@ -2248,14 +2353,20 @@ class VoiceChatApp(App):
 
     # --- Group Chat Logic ---
     def show_create_group_popup(self, instance):
-        box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text=self.tr.get('enter_group_name_label', "Enter group name:")))
-        self.group_name_input = TextInput(multiline=False)
-        box.add_widget(self.group_name_input)
-        ok_button = Button(text=self.tr.get('create_button', "Create"))
-        box.add_widget(ok_button)
-        popup = AnimatedPopup(title=self.tr.get('create_group_title', "Create Group"), content=box, size_hint=(0.8, 0.4))
+        self.group_name_input = MDTextField(hint_text=self.tr.get('enter_group_name_label', "Enter group name:"))
+        
+        ok_button = MDRaisedButton(text=self.tr.get('create_button', "Create"))
+        cancel_button = MDFlatButton(text=self.tr.get('cancel_button', "Cancel"))
+
+        popup = MDDialog(
+            title=self.tr.get('create_group_title', "Create Group"),
+            type="custom",
+            content_cls=self.group_name_input,
+            buttons=[ok_button, cancel_button]
+        )
+        
         ok_button.bind(on_press=lambda x: self.create_group(popup))
+        cancel_button.bind(on_press=popup.dismiss)
         popup.open()
 
     def create_group(self, popup):
@@ -2284,8 +2395,7 @@ class VoiceChatApp(App):
     @mainthread
     def add_group_to_list(self, group_id, group_name):
         users_list = self.root.ids.chat_layout.ids.users_list
-        theme = self.themes[self.current_theme]
-        group_button = Button(text=f"[GROUP] {group_name}", size_hint_y=None, height=40, background_color=theme['button_bg'], color=theme['button_text'])
+        group_button = MDRaisedButton(text=f"[GROUP] {group_name}", size_hint_y=None, height=dp(40))
         group_button.bind(on_press=lambda x: self.switch_chat(group_id))
         users_list.add_widget(group_button)
 
@@ -2296,35 +2406,100 @@ class VoiceChatApp(App):
         history = self.chat_history.get(chat_id, [])
         for message_data in history:
             self.add_message_to_box(message_data, chat_id)
-        # Update title or some indicator
+
+        # --- Configure Context Buttons ---
+        # Unbind old handlers first to prevent multiple bindings
+        if self._primary_context_handler:
+            self.primary_context_button.unbind(on_press=self._primary_context_handler)
+            self._primary_context_handler = None
+        if self._secondary_context_handler:
+            self.secondary_context_button.unbind(on_press=self._secondary_context_handler)
+            self._secondary_context_handler = None
+
+        # --- Handle different chat contexts ---
         if chat_id == 'global':
             Window.title = self.tr.get('window_title', "JustMessenger")
-        else:
-            if self.mode.startswith('p2p'):
-                group_info = self.p2p_manager.groups.get(chat_id, {})
-            else: # server mode
-                group_info = self.server_groups.get(chat_id, {})
-            
+            self.primary_context_button.opacity = 0
+            self.primary_context_button.disabled = True
+            self.secondary_context_button.opacity = 0
+            self.secondary_context_button.disabled = True
+            return
+
+        is_group = False
+        is_admin = False
+        group_info = {}
+
+        if self.mode.startswith('p2p') and self.p2p_manager and chat_id in self.p2p_manager.groups:
+            group_info = self.p2p_manager.groups.get(chat_id, {})
+            is_group = True
+        elif self.mode == 'server' and chat_id in self.server_groups:
+            group_info = self.server_groups.get(chat_id, {})
+            is_group = True
+
+        if is_group:
             group_name = group_info.get('name', 'Group')
             Window.title = f"{self.tr.get('window_title', 'JustMessenger')} - {group_name}"
             is_admin = group_info.get('admin') == self.username
-            
-            is_admin = group_info.get('admin') == self.username
-            
-            self.group_call_button.opacity = 1 if is_admin else 0
-            self.group_call_button.disabled = not is_admin
 
-            self.invite_user_button.opacity = 1 if is_admin else 0
-            self.invite_user_button.disabled = not is_admin
+            # Primary: Call Group
+            self.primary_context_button.text = self.tr.get('call_button_short', 'Call')
+            self._primary_context_handler = self.start_group_call
+            self.primary_context_button.bind(on_press=self._primary_context_handler)
+            self.primary_context_button.opacity = 1
+            self.primary_context_button.disabled = False
+            
+            if is_admin:
+                # Secondary: Manage Group (which includes inviting)
+                self.secondary_context_button.text = self.tr.get('manage_button', 'Manage')
+                self._secondary_context_handler = self.show_manage_group_popup
+                self.secondary_context_button.bind(on_press=self._secondary_context_handler)
+                self.secondary_context_button.opacity = 1
+                self.secondary_context_button.disabled = False
+            else:
+                self.secondary_context_button.opacity = 0
+                self.secondary_context_button.disabled = True
 
-            self.manage_group_button.opacity = 1 if is_admin else 0
-            self.manage_group_button.disabled = not is_admin
+        else: # It's a user chat
+            Window.title = f"{self.tr.get('window_title', 'JustMessenger')} - {chat_id}"
+            
+            # Primary: Call User
+            self.primary_context_button.text = self.tr.get('call_button_short', 'Call')
+            # Use a lambda to pass the specific user at time of binding
+            self._primary_context_handler = lambda instance: self.initiate_call(chat_id)
+            self.primary_context_button.bind(on_press=self._primary_context_handler)
+            self.primary_context_button.opacity = 1
+            self.primary_context_button.disabled = False
+            
+            # No secondary action for private chats
+            self.secondary_context_button.opacity = 0
+            self.secondary_context_button.disabled = True
 
     def show_group_call_popup(self):
         group_name = self.p2p_manager.groups.get(self.active_group_call, {}).get('name', '')
         self.group_call_popup = GroupCallPopup(group_name, self.tr)
         self.group_call_popup.bind(on_dismiss=lambda x: self.hang_up_call())
         self.group_call_popup.open()
+        # Initial population of the participants list
+        self.update_group_members_ui(self.active_group_call)
+
+    def update_group_members_ui(self, group_id):
+        """Refreshes the displayed list of members for a group call."""
+        if not self.group_call_popup or group_id != self.active_group_call:
+            return
+
+        if self.mode.startswith('p2p'):
+            members = self.p2p_manager.groups.get(group_id, {}).get('members', [])
+        elif self.mode == 'server':
+            members = self.server_groups.get(group_id, {}).get('members', [])
+        else:
+            members = []
+
+        # Clear existing member widgets
+        self.group_call_popup.participants_list.clear_widgets()
+        
+        # Add a label for each member
+        for member in members:
+            self.group_call_popup.participants_list.add_widget(MDLabel(text=member, halign="center"))
 
     @mainthread
     def on_group_joined(self, group_id, username):
@@ -2333,15 +2508,16 @@ class VoiceChatApp(App):
 
     @mainthread
     def on_incoming_group_invite(self, group_id, group_name, admin_username):
-        box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text=self.tr.get('group_invite_message', "You are invited to join the group '{group_name}' by {admin_username}.", group_name=group_name, admin_username=admin_username)))
-        btn_layout = BoxLayout(spacing=10)
-        yes_btn = Button(text=self.tr.get('accept_button', 'Accept'))
-        no_btn = Button(text=self.tr.get('decline_button', 'Decline'))
-        btn_layout.add_widget(yes_btn)
-        btn_layout.add_widget(no_btn)
-        box.add_widget(btn_layout)
-        popup = AnimatedPopup(title=self.tr.get('group_invitation_title', "Group Invitation"), content=box, size_hint=(0.8, 0.5), auto_dismiss=False)
+        box = MDBoxLayout(orientation='vertical', spacing=10, padding=10)
+        yes_btn = MDRaisedButton(text=self.tr.get('accept_button', 'Accept'))
+        no_btn = MDFlatButton(text=self.tr.get('decline_button', 'Decline'))
+
+        popup = MDDialog(
+            title=self.tr.get('group_invitation_title', "Group Invitation"),
+            text=self.tr.get('group_invite_message', "You are invited to join the group '{group_name}' by {admin_username}.", group_name=group_name, admin_username=admin_username),
+            buttons=[yes_btn, no_btn],
+            auto_dismiss=False
+        )
 
         def on_yes(inst):
             if self.mode.startswith('p2p'):
@@ -2380,7 +2556,7 @@ class VoiceChatApp(App):
         elif self.mode == 'server':
             if not self.server_manager: return
             # Assuming server_manager holds the user list
-            all_users = [c.text for c in self.root.ids.chat_layout.ids.users_list.children if isinstance(c, Button) and not c.text.startswith('[GROUP]')]
+            all_users = [c.text for c in self.root.ids.chat_layout.ids.users_list.children if isinstance(c, MDRaisedButton) and not c.text.startswith('[GROUP]')]
             current_members = self.server_groups.get(self.active_chat, {}).get('members', [])
             available_users = [u for u in all_users if u not in current_members]
         else:
@@ -2390,11 +2566,11 @@ class VoiceChatApp(App):
             self.add_message_to_box(self.tr.get('all_users_in_group_message', "System: All available users are already in the group."), self.active_chat)
             return
 
-        box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text=self.tr.get('select_user_to_invite_label', "Select a user to invite:")))
-        popup = AnimatedPopup(title=self.tr.get('invite_user_title', "Invite User"), content=box, size_hint=(0.6, 0.8))
+        box = MDBoxLayout(orientation='vertical', spacing=10, padding=10)
+        box.add_widget(MDLabel(text=self.tr.get('select_user_to_invite_label', "Select a user to invite:")))
+        popup = MDDialog(title=self.tr.get('invite_user_title', "Invite User"), type="custom", content_cls=box)
         for username in available_users:
-            btn = Button(text=username)
+            btn = MDRaisedButton(text=username)
             btn.bind(on_press=lambda x, u=username: self.invite_user(u, popup))
             box.add_widget(btn)
         popup.open()
@@ -2432,6 +2608,7 @@ class VoiceChatApp(App):
 
         popup = ManageGroupPopup(self.tr, members_to_manage)
         popup.bind(on_kick_user=self.on_kick_user_selected)
+        popup.bind(on_invite_user=lambda x: self.show_invite_user_popup(None))
         popup.open()
 
     def on_kick_user_selected(self, popup, username):
@@ -2482,16 +2659,20 @@ class VoiceChatApp(App):
             # self.p2p_manager.send_group_call_response(group_id, 'reject') # Maybe not needed
             return
 
-        box = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        box = MDBoxLayout(orientation='vertical', spacing=10, padding=10)
         group_name = self.p2p_manager.groups.get(group_id, {}).get('name', '') if self.mode.startswith('p2p') else self.server_groups.get(group_id, {}).get('name', '')
-        box.add_widget(Label(text=f"Incoming group call from '{admin_username}' for group '{group_name}'."))
-        btn_layout = BoxLayout(spacing=10)
-        yes_btn = Button(text='Join')
-        no_btn = Button(text='Decline')
-        btn_layout.add_widget(yes_btn)
-        btn_layout.add_widget(no_btn)
-        box.add_widget(btn_layout)
-        popup = AnimatedPopup(title="Incoming Group Call", content=box, size_hint=(0.8, 0.5), auto_dismiss=False)
+        box.add_widget(MDLabel(text=f"Incoming group call from '{admin_username}' for group '{group_name}'."))
+        
+        yes_btn = MDRaisedButton(text='Join')
+        no_btn = MDFlatButton(text='Decline')
+
+        popup = MDDialog(
+            title="Incoming Group Call",
+            type="custom",
+            content_cls=box,
+            buttons=[yes_btn, no_btn],
+            auto_dismiss=False
+        )
 
         def on_yes(inst):
             self.negotiated_rate = sample_rate
@@ -2528,7 +2709,7 @@ class VoiceChatApp(App):
         if group_id == self.active_group_call:
             # self.audio_threads was part of the old implementation
             self.add_message_to_box(f"System: {username} left the call.", group_id)
-            # Update UI for group calls will need to be implemented with WebRTC logic
+            self.update_group_members_ui(group_id)
 
 
     def join_server_group_call(self, group_id):
@@ -2552,13 +2733,13 @@ class VoiceChatApp(App):
     def on_user_joined_call(self, group_id, username):
         if group_id == self.active_group_call:
             self.add_message_to_box(f"System: {username} joined the call.", group_id)
-            # Update UI if needed
+            self.update_group_members_ui(group_id)
 
     @mainthread
     def on_user_left_call(self, group_id, username):
         if group_id == self.active_group_call:
             self.add_message_to_box(f"System: {username} left the call.", group_id)
-            # Update UI if needed
+            self.update_group_members_ui(group_id)
 
     @mainthread
     def on_initial_data_received(self, groups, users):
@@ -2625,84 +2806,99 @@ class VoiceChatApp(App):
             # Another user was kicked
             message = f"System: {kicked_username} was kicked by {admin_username}."
             self.add_message_to_box(message, group_id)
-            # self.update_user_list(group_id) # TODO: Need a way to show group members
+            self.update_group_members_ui(group_id)
 
     def create_emoji_panel(self):
         emoji_panel = self.root.ids.chat_layout.ids.emoji_panel
-        
-        # Configure the tabbed panel to prevent text overlap and size tabs appropriately.
-        tab_panel = TabbedPanel(
-            do_default_tab=False,
-            tab_pos='top_left',
-            tab_width=150  # Give tabs a fixed width to prevent text overlap
-        )
+        tab_panel = MDTabs()
+        tab_panel.bind(on_tab_switch=self.on_emoji_tab_switch)
         categorized_emojis = self.emoji_manager.get_categorized_emojis()
 
+        class EmojiCategoryTab(MDFloatLayout, MDTabsBase):
+            pass
+
         for category, emojis in categorized_emojis.items():
-            # Reduce font size on tab headers to ensure text fits
-            tab = TabbedPanelHeader(text=category, font_size='12sp')
+            # Use markup to control font size in tab title
+            tab = EmojiCategoryTab(title=f"[size=12sp]{category}[/size]")
             
-            # This grid will contain the emoji buttons
-            grid = GridLayout(cols=1, spacing=dp(5), size_hint_y=None) # Start with 1 col, will be updated
-            grid.bind(minimum_height=grid.setter('height'))
-
-            # This function will be called whenever the ScrollView's width changes
-            def update_cols(grid_layout, scroll_view_instance, width):
-                if width <= 0: return # Avoid calculations when panel is hidden
-                # dp(40) for button width, dp(5) for spacing. Total dp(45) per column.
-                new_cols = max(1, int(width / dp(45)))
-                grid_layout.cols = new_cols
-
-            # The ScrollView will handle scrolling and trigger the responsive grid logic
             scroll_view = ScrollView(scroll_type=['bars', 'content'], bar_width=dp(10), scroll_wheel_distance=dp(40))
-            # Bind the update function to the ScrollView's width property
-            scroll_view.bind(width=partial(update_cols, grid))
-
-            for emoji in emojis:
-                btn = Button(
-                    text=emoji,
-                    font_name='EmojiFont',
-                    font_size='24sp',
-                    size_hint=(None, None),
-                    size=(dp(40), dp(40))
-                )
-                btn.bind(on_press=self.add_emoji_to_input)
-                grid.add_widget(btn)
+            grid = MDGridLayout(cols=1, spacing=dp(5), size_hint_y=None)
+            grid.bind(minimum_height=grid.setter('height'))
+            
+            # Store grid and emojis for lazy loading
+            tab.grid = grid
+            tab.emojis = emojis
+            tab.loaded = False # Flag to check if content is loaded
             
             scroll_view.add_widget(grid)
-            tab.content = scroll_view
+            tab.add_widget(scroll_view)
             tab_panel.add_widget(tab)
             
         emoji_panel.add_widget(tab_panel)
+        # Manually trigger the load for the first tab
+        if tab_panel.get_tab_list():
+            self.on_emoji_tab_switch(tab_panel, tab_panel.get_tab_list()[0], None, None)
+
+    def on_emoji_tab_switch(self, instance_tabs, instance_tab, instance_tab_label, tab_text):
+        """Loads the content of an emoji tab only when it's selected."""
+        if not hasattr(instance_tab, 'loaded') or instance_tab.loaded:
+            return
+
+        grid = instance_tab.grid
+        emojis = instance_tab.emojis
+        
+        def update_cols(grid_layout, scroll_view_instance, width):
+            if width <= 0: return
+            new_cols = max(1, int(width / dp(45)))
+            grid_layout.cols = new_cols
+
+        scroll_view = grid.parent
+        scroll_view.bind(width=partial(update_cols, grid))
+
+        for emoji in emojis:
+            btn = MDIconButton(
+                icon=emoji,
+                font_name='EmojiFont',
+                font_size='24sp',
+                size_hint=(None, None),
+                size=(dp(40), dp(40)),
+            )
+            btn.emoji_char = emoji
+            btn.bind(on_press=self.add_emoji_to_input)
+            grid.add_widget(btn)
+        
+        instance_tab.loaded = True
 
     def toggle_emoji_panel(self, instance):
-        chat_layout = self.root.ids.chat_layout
-        emoji_panel = chat_layout.ids.emoji_panel
-        
-        # This approach avoids size_hint by directly manipulating width
-        target_width = chat_layout.width * 0.3
-        
-        if emoji_panel.width > 0: # If panel is visible, hide it
-            anim = Animation(width=0, d=0.2, t='out_quad')
-            emoji_panel.disabled = True
-            emoji_panel.opacity = 0
-        else: # If panel is hidden, show it
-            anim = Animation(width=target_width, d=0.2, t='out_quad')
-            emoji_panel.disabled = False
-            emoji_panel.opacity = 1
+        emoji_panel = self.root.ids.chat_layout.ids.emoji_panel
+        panel_target_width = 300
+
+        if emoji_panel.width > 0:
+            new_window_width = Window.width - emoji_panel.width
+            Window.size = (new_window_width, Window.height)
             
-        anim.start(emoji_panel)
+            panel_anim = Animation(width=0, opacity=0, d=0.2, t='out_quad')
+            panel_anim.start(emoji_panel)
+            emoji_panel.disabled = True
+        else:
+            new_window_width = Window.width + panel_target_width
+            Window.size = (new_window_width, Window.height)
+
+            panel_anim = Animation(width=panel_target_width, opacity=1, d=0.2, t='out_quad')
+            panel_anim.start(emoji_panel)
+            emoji_panel.disabled = False
 
     def add_emoji_to_input(self, instance):
-        self.root.ids.chat_layout.ids.msg_entry.text += instance.text
+        self.root.ids.chat_layout.ids.msg_entry.text += instance.emoji_char
         self.root.ids.chat_layout.ids.msg_entry.focus = True
 
     def show_popup(self, title, message):
-        box = BoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(Label(text=message))
-        ok_button = Button(text="OK", size_hint_y=None, height=44)
-        box.add_widget(ok_button)
-        popup = AnimatedPopup(title=title, content=box, size_hint=(0.7, 0.4))
+        ok_button = MDRaisedButton(text="OK")
+        popup = MDDialog(
+            title=title,
+            text=message,
+            buttons=[ok_button]
+        )
         ok_button.bind(on_press=popup.dismiss)
         popup.open()
 
@@ -2803,7 +2999,7 @@ class VoiceChatApp(App):
         self.is_muted = not self.is_muted
         
         # Mute/unmute WebRTC call
-        # This needs to be implemented in WebRTCManager by controlling the audio track
+        self.webrtc_manager.set_mute(self.is_muted)
         
         # Update UI
         if self.call_popup:
@@ -2846,16 +3042,6 @@ class VoiceChatApp(App):
             self.add_message_to_box(f"Error handling drop: {e}", 'global')
 
 
-# Helper for theming
-def set_bg(widget, color):
-    widget.canvas.before.clear()
-    with widget.canvas.before:
-        Color(*color)
-        rect = Rectangle(pos=widget.pos, size=widget.size)
-    def update_rect(instance, value):
-        rect.pos = instance.pos
-        rect.size = instance.size
-    widget.bind(pos=update_rect, size=update_rect)
 
 if __name__ == '__main__':
     VoiceChatApp().run()

@@ -457,6 +457,10 @@ class P2PManager:
         for username in list(self.peers.keys()):
             self._send_encrypted_command(username, 'message', message_dict)
 
+    def send_private_message(self, target_username, message_dict):
+        """Sends an encrypted message to a single peer."""
+        self._send_encrypted_command(target_username, 'message', message_dict)
+
     def broadcast_delete_message(self, msg_id):
         for username in list(self.peers.keys()):
             self._send_encrypted_command(username, 'delete_message', {'id': msg_id})

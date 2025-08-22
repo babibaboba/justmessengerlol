@@ -3,6 +3,27 @@
 <RootLayout>:
     orientation: 'vertical'
     
+    TitleBar:
+        id: title_bar
+        orientation: 'horizontal'
+        padding: (dp(5), 0)
+        
+        MDLabel:
+            text: "JustMessenger"
+            size_hint_x: 1.0
+            halign: 'left'
+            valign: 'center'
+        
+        MDIconButton:
+            icon: 'minus'
+            on_release: app.get_running_app().root_window.minimize()
+        MDIconButton:
+            icon: 'checkbox-blank-outline'
+            on_release: app.get_running_app().root_window.maximize() if app.get_running_app().root_window.size != (1920, 1080) else app.get_running_app().root_window.restore()
+        MDIconButton:
+            icon: 'close'
+            on_release: app.stop()
+
     ChatLayout:
         id: chat_layout
 
@@ -41,28 +62,20 @@
             size_hint_y: None
             height: 40
             spacing: 5
-            TextInput:
+            MDTextField:
                 id: msg_entry
                 multiline: False
                 hint_text: app.tr.get('message_input_hint', "Type a message...")
-                font_name: 'EmojiFont'
-            Button:
+                mode: "fill"
+            MDIconButton:
                 id: record_button
-                text: '🎤'
-                font_name: 'EmojiFont'
-                size_hint_x: None
-                width: 40
-            Button:
+                icon: "microphone"
+            MDIconButton:
                 id: emoji_button
-                text: '🙂'
-                font_name: 'EmojiFont'
-                size_hint_x: None
-                width: 40
-            Button:
+                icon: "emoticon"
+            MDRaisedButton:
                 id: send_button
                 text: app.tr.get('send_button', 'Send')
-                size_hint_x: None
-                width: 80
 
     BoxLayout:
         id: users_panel
@@ -85,9 +98,10 @@
                 height: 40
                 spacing: 5
             
-            Label:
+            MDLabel:
                 id: users_list_label
                 text: app.tr.get('users_in_chat_label', 'Users Online')
+                halign: 'center'
                 size_hint_y: None
                 height: 30
         
@@ -105,12 +119,9 @@
             size_hint_y: None
             height: 44
             spacing: 5
-            Button:
+            MDIconButton:
                 id: settings_button
-                text: '⚙️'
-                font_name: 'EmojiFont'
-                size_hint_x: None
-                width: 44
-            Button:
+                icon: 'cog'
+            MDRaisedButton:
                 id: theme_button
                 text: app.tr.get('toggle_theme_button', 'Toggle Theme')
