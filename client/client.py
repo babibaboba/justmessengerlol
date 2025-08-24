@@ -1,5 +1,6 @@
 import sys
 import os
+import logging
 import socket
 import uuid
 import threading
@@ -19,1860 +20,1972 @@ import sounddevice as sd
 import soundfile as sf
 import numpy as np
 
-
-# Kivy imports
-from kivymd.app import MDApp
-from kivymd.uix.boxlayout import MDBoxLayout
+# Flet imports
+import flet as ft
 import asyncio
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError, AudioStreamTrack
 from av import AudioFrame
-from kivymd.uix.label import MDLabel
-from kivymd.uix.progressbar import MDProgressBar
-from kivymd.uix.button import MDRaisedButton, MDIconButton, MDFlatButton
-from kivymd.uix.textfield import MDTextField
-from kivymd.uix.gridlayout import MDGridLayout
-from kivymd.uix.dialog import MDDialog
-from kivy.uix.scrollview import ScrollView
-from kivymd.uix.slider import MDSlider
-from kivymd.uix.tab import MDTabs, MDTabsBase
-from kivymd.uix.selectioncontrol import MDSwitch
-from kivy.clock import mainthread, Clock
-from kivy.core.window import Window
-from kivy.graphics import Color, Rectangle
-from kivy.animation import Animation
-from kivy.core.audio import SoundLoader
-from kivy.core.text import LabelBase
-from kivymd.theming import ThemeManager
-from kivy.metrics import dp
-from kivymd.uix.menu import MDDropdownMenu
-from kivymd.uix.floatlayout import MDFloatLayout
 
-# --- Set borderless before anything else ---
-Window.borderless = True
-Window.size = (1000, 600)
+# Create icons mapping for Flet compatibility
+class Icons:
+    EDIT = "edit"
+    MENU = "menu"
+    PHONE = "phone"
+    MORE_VERT = "more_vert"
+    SEND = "send"
+    MIC = "mic"
+    ATTACH_FILE = "attach_file"
+    EMOJI_EMOTIONS = "emoji_emotions"
+    SEARCH = "search"
+    CLOSE = "close"
+    INFO_OUTLINE = "info_outline"
+    PERSON = "person"
+    NOTIFICATIONS = "notifications"
+    GROUP_ADD = "group_add"
+    CONTACTS = "contacts"
+    SETTINGS = "settings"
+    REPLY = "reply"
+    COPY = "copy"
+    DELETE = "delete"
+    KEYBOARD_OUTLINED = "keyboard_outlined"
+    AUDIOTRACK_OUTLINED = "audiotrack_outlined"
+    PALETTE_OUTLINED = "palette_outlined"
+    SECURITY_OUTLINED = "security_outlined"
+    EXTENSION_OUTLINED = "extension_outlined"
+    ARROW_BACK = "arrow_back"
+    MIC_OFF = "mic_off"
+    CALL_END = "call_end"
+    CALL = "call"
+    BROKEN_IMAGE = "broken_image"
+    INSERT_DRIVE_FILE = "insert_drive_file"
+    PHOTO = "photo"
+    LOCATION_ON = "location_on"
+    CONTACT = "contacts"
+    BLUETOOTH_SEARCHING = "bluetooth_searching"
+    SENTIMENT_SATISFIED = "sentiment_satisfied"
+    ACCESSIBILITY = "accessibility"
+    PETS = "pets"
+    EMOJI_FOOD_BEVERAGE = "emoji_food_beverage"
+    AIRPLANEMODE_ACTIVE = "airplanemode_active"
+    SPORTS_ESPORTS = "sports_esports"
+    LIGHTBULB = "lightbulb"
+    INFO = "info"
+    FLAG = "flag"
+    PLUS = "plus"
 
-# Project imports
+# Replace ft.icons with our icons class
+ft.icons = Icons()
+
+# Create colors mapping for Flet compatibility
+class Colors:
+    WHITE = "#FFFFFF"
+    WHITE70 = "#FFFFFFB2"
+    GREY = "#808080"
+    GREY_400 = "#BDBDBD"
+    GREY_500 = "#9E9E9E"
+    BLACK = "#000000"
+    RED = "#FF0000"
+    PRIMARY = "#1976D2"  # Default primary color
+    SURFACE = "#121212"  # Default surface color for dark theme
+
+    # Additional colors from theme
+    PRIMARY_GRAY = "#2d2d2d"
+    SECONDARY_GRAY = "#424242"
+    BACKGROUND = "#1a1a1a"
+    SURFACE_VARIANT = "#333333"
+    PRIMARY_PURPLE = "#7C4DFF"
+    SECONDARY_PURPLE = "#651FFF"
+    TERTIARY_PURPLE = "#E1BEE7"
+    ERROR = "#FF5252"
+    SUCCESS = "#4CAF50"
+
+    @staticmethod
+    def with_opacity(opacity, color):
+        """Create color with opacity - simplified version"""
+        if isinstance(color, str) and color.startswith('#'):
+            # Extract RGB and add alpha
+            if len(color) == 7:  # #RRGGBB format
+                r, g, b = color[1:3], color[3:5], color[5:7]
+                alpha = hex(int(255 * opacity))[2:].zfill(2)
+                return f"#{r}{g}{b}{alpha}"
+        return color
+
+# Replace ft.colors with our colors class
+ft.colors = Colors()
+
+# Project imports - reusing all backend logic
 try:
-    from p2p_manager import P2PManager
-    import stun
-    from plugin_manager import PluginManager
-    from translator import Translator
+    from managers.p2p_manager import P2PManager, stun
+    from managers.plugin_manager import PluginManager
+    from managers.translator import Translator
+    from managers.bluetooth_manager import BluetoothManager
+    from managers.emoji_manager import EmojiManager
+    from managers.hotkey_manager import HotkeyManager
+    from managers.audio_manager import AudioManager, MicrophoneStreamTrack, AudioTrackPlayer
+    from managers.webrtc_manager import WebRTCManager
+    from managers.config_manager import ConfigManager
+    from managers.server_manager import ServerManager
 except ImportError as e:
     print(f"Import Error: {e}")
     sys.exit(1)
 
-# --- Constants ---
-
-# ------------------- Manager Classes -------------------
-class BluetoothManager:
-        def __init__(self, username, callback_queue):
-            self.username = username
-            self.callback_queue = callback_queue
-            self.server_sock = None
-            self.client_sock = None
-            self.running = False
-            self.server_thread = None
-            self.client_thread = None
-            self.uuid = "94f39d29-7d6d-437d-973b-fba39e49d4ee" # Unique UUID for this app
-    
-        def start(self):
-            self.running = True
-            self.server_thread = threading.Thread(target=self.run_server, daemon=True)
-            self.server_thread.start()
-            print("BluetoothManager server started.")
-    
-        def stop(self):
-            self.running = False
-            if self.server_sock:
-                self.server_sock.close()
-            if self.client_sock:
-                self.client_sock.close()
-            print("BluetoothManager stopped.")
-    
-        def discover_devices(self):
-            """Scans for nearby Bluetooth devices."""
-            print("Scanning for Bluetooth devices...")
-            try:
-                nearby_devices = bluetooth.discover_devices(duration=8, lookup_names=True, flush_cache=True, lookup_class=False)
-                self.callback_queue.put(('bt_devices_discovered', nearby_devices))
-                return nearby_devices
-            except Exception as e:
-                print(f"Error discovering devices: {e}")
-                self.callback_queue.put(('bt_discovery_error', str(e)))
-                return []
-    
-        def run_server(self):
-            """Listens for incoming Bluetooth connections."""
-            try:
-                self.server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-                self.server_sock.bind(("", bluetooth.PORT_ANY))
-                self.server_sock.listen(1)
-    
-                port = self.server_sock.getsockname()[1]
-    
-                bluetooth.advertise_service(self.server_sock, "VoiceChatApp",
-                                          service_id=self.uuid,
-                                          service_classes=[self.uuid, bluetooth.SERIAL_PORT_CLASS],
-                                          profiles=[bluetooth.SERIAL_PORT_PROFILE])
-                
-                print(f"Waiting for connection on RFCOMM channel {port}")
-                
-                while self.running:
-                    try:
-                        client_sock, client_info = self.server_sock.accept()
-                        self.callback_queue.put(('bt_connection_received', client_info))
-                        # Handle the connection in a new thread
-                        handler_thread = threading.Thread(target=self.handle_client, args=(client_sock,), daemon=True)
-                        handler_thread.start()
-                    except bluetooth.btcommon.BluetoothError:
-                        # This happens when the socket is closed
-                        break
-            except OSError as e:
-                # This specific error (10040 or similar) can happen if the BT adapter is off
-                print(f"Bluetooth server OS error: {e}")
-                self.callback_queue.put(('bt_adapter_error', 'Please ensure your Bluetooth adapter is turned on.'))
-            except Exception as e:
-                print(f"Bluetooth server error: {e}")
-                self.callback_queue.put(('bt_server_error', str(e)))
-    
-        def handle_client(self, sock):
-            """Handles an incoming client connection."""
-            try:
-                while self.running:
-                    data = sock.recv(1024)
-                    if not data:
-                        break
-                    message = data.decode('utf-8')
-                    self.callback_queue.put(('bt_message_received', message))
-            except Exception as e:
-                print(f"Error handling BT client: {e}")
-            finally:
-                sock.close()
-    
-        def connect_to_device(self, addr):
-            """Connects to a specific Bluetooth device."""
-            print(f"Connecting to {addr}...")
-            try:
-                service_matches = bluetooth.find_service(uuid=self.uuid, address=addr)
-    
-                if len(service_matches) == 0:
-                    self.callback_queue.put(('bt_connection_failed', "Service not found."))
-                    return
-    
-                first_match = service_matches[0]
-                port = first_match["port"]
-                name = first_match["name"]
-                host = first_match["host"]
-    
-                sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-                sock.connect((host, port))
-                
-                self.client_sock = sock
-                self.callback_queue.put(('bt_connection_successful', name))
-                
-                # Start a thread to listen for messages from this connection
-                self.client_thread = threading.Thread(target=self.listen_for_messages, daemon=True)
-                self.client_thread.start()
-    
-            except Exception as e:
-                print(f"Error connecting to device: {e}")
-                self.callback_queue.put(('bt_connection_failed', str(e)))
-    
-        def listen_for_messages(self):
-            """Listens for messages on the client socket."""
-            try:
-                while self.running and self.client_sock:
-                    data = self.client_sock.recv(1024)
-                    if not data:
-                        break
-                    message = data.decode('utf-8')
-                    self.callback_queue.put(('bt_message_received', message))
-            except Exception as e:
-                print(f"Error in client listening thread: {e}")
-            finally:
-                if self.client_sock:
-                    self.client_sock.close()
-                    self.client_sock = None
-                self.callback_queue.put(('bt_disconnected', None))
-    
-    
-        def send_message(self, message):
-            """Sends a message to the connected device."""
-            if self.client_sock:
-                try:
-                    self.client_sock.send(message.encode('utf-8'))
-                    return True
-                except Exception as e:
-                    print(f"Error sending BT message: {e}")
-                    return False
-            return False
-    
-class EmojiManager:
-    def __init__(self):
-        self.categorized_emojis = self._get_windows_emojis()
-
-    def _get_windows_emojis(self):
-        """Generates a categorized dictionary of emojis using Windows Unicode ranges."""
-        # These are common Unicode blocks for emojis.
-        # It's not a perfect categorization, but it's robust and doesn't rely on external libraries.
-        categories = {
-            'Smileys & People': list(range(0x1F600, 0x1F650)),
-            'Animals & Nature': list(range(0x1F400, 0x1F440)),
-            'Food & Drink': list(range(0x1F330, 0x1F390)),
-            'Symbols & Pictographs': list(range(0x1F300, 0x1F600)),
-            'Transport & Map': list(range(0x1F680, 0x1F700)),
-            'Objects': list(range(0x1F500, 0x1F540)),
-            'Dingbats': list(range(0x2700, 0x27C0)),
-            'Misc Symbols': list(range(0x2600, 0x2700)),
-        }
-        
-        # Convert integer code points to characters
-        char_categories = {}
-        for category, code_points in categories.items():
-            char_categories[category] = [chr(cp) for cp in code_points]
-            
-        return char_categories
-
-    def get_categorized_emojis(self):
-        """Returns a dictionary of emojis grouped by category."""
-        return self.categorized_emojis
-    
-    
-class HotkeyManager(threading.Thread):
-    def __init__(self):
-        super().__init__(daemon=True)
-        self.hotkey = None
-        self.callback = None
-        self.running = True
-        self.listener = None
-
-    def set_hotkey(self, key_combination):
-        """
-        Sets the hotkey to listen for.
-        key_combination should be a set of pynput.keyboard.Key or pynput.keyboard.KeyCode
-        e.g., {keyboard.Key.ctrl, keyboard.KeyCode.from_char('m')}
-        """
-        self.hotkey = key_combination
-
-    def register_callback(self, func):
-        self.callback = func
-
-    def run(self):
-        # A set of currently pressed keys
-        current_keys = set()
-
-        def on_press(key):
-            if self.hotkey and key in self.hotkey:
-                current_keys.add(key)
-                if all(k in current_keys for k in self.hotkey):
-                    if self.callback:
-                        self.callback()
-            
-        def on_release(key):
-            try:
-                current_keys.remove(key)
-            except KeyError:
-                pass # Key was not in the set
-
-        # Collect events until released
-        with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-            self.listener = listener
-            listener.join()
-
-    def stop(self):
-        if self.listener:
-            self.listener.stop()
-
-
-class AudioManager:
-    """Manages all audio-related functionality like devices, recording, and playback."""
-    def __init__(self, app, callback_queue):
-        self.app = app
-        self.callback_queue = callback_queue
-        self.is_recording = False
-        self.is_testing_mic = False
-        self.recording_stream = None
-        self.mic_test_stream = None
-        self.recording_file = None
-        self.input_volume = 1.0  # Gain factor from 0.0 to 1.0+
-        self.output_volume = 1.0
-
-    def resample_and_frame(self, data, sample_rate, block_size):
-        pts = int(datetime.utcnow().timestamp() * 1000)
-        return AudioFrame(
-            channels=1,
-            data=data,
-            sample_rate=sample_rate,
-            sample_width=2, # 16-bit audio
-            timestamp=pts,
-            time_base='1/1000'
-        )
-
-    def get_devices(self):
-        """Returns a tuple of (input_devices, output_devices) dictionaries."""
-        input_devices = {}
-        output_devices = {}
-        try:
-            devices = sd.query_devices()
-            for i, device in enumerate(devices):
-                display_name = f"{sd.query_hostapis(device['hostapi'])['name']}: {device['name']}"
-                if device['max_input_channels'] > 0:
-                    input_devices[display_name] = i
-                if device['max_output_channels'] > 0:
-                    output_devices[display_name] = i
-        except Exception as e:
-            print(f"Error getting audio devices: {e}")
-        return input_devices, output_devices
-
-    def start_recording(self, filename, device_index):
-        """Starts recording audio from a specific device to a file."""
-        if self.is_recording:
-            return False
-        
-        self.is_recording = True
-        
-        try:
-            samplerate = 44100
-            channels = 1
-            
-            self.recording_file = sf.SoundFile(filename, mode='x', samplerate=samplerate, channels=channels)
-
-            def audio_callback(indata, frames, time, status):
-                if status:
-                    print(status, file=sys.stderr)
-                if self.is_recording and self.recording_file:
-                    processed_data = indata * self.input_volume
-                    self.recording_file.write(processed_data)
-
-            self.recording_stream = sd.InputStream(
-                samplerate=samplerate,
-                device=device_index,
-                channels=channels,
-                callback=audio_callback
-            )
-            self.recording_stream.start()
-            print(f"Recording started to {filename}")
-            return True
-        except Exception as e:
-            print(f"Error starting recording: {e}")
-            self.is_recording = False
-            if self.recording_file:
-                self.recording_file.close()
-                self.recording_file = None
-            return False
-
-    def stop_recording(self):
-        """Stops the current recording."""
-        if not self.is_recording:
-            return
-        
-        print("Stopping recording...")
-        if self.recording_stream:
-            self.recording_stream.stop()
-            self.recording_stream.close()
-            self.recording_stream = None
-        
-        if self.recording_file:
-            self.recording_file.close()
-            self.recording_file = None
-            
-        self.is_recording = False
-        print("Recording stopped.")
-
-    def start_mic_test(self, input_device_index, output_device_index):
-        """Starts a microphone test with audio loopback and volume meter."""
-        if self.is_testing_mic:
-            return
-
-        self.is_testing_mic = True
-        try:
-            samplerate = 44100
-            
-            def audio_callback(indata, outdata, frames, time, status):
-                if status:
-                    print(status, file=sys.stderr)
-                
-                # Process input volume
-                processed_data = indata * self.input_volume
-                
-                # Loopback audio to output device
-                outdata[:] = processed_data
-                
-                # Update volume meter
-                volume_norm = np.linalg.norm(processed_data) * 10
-                self.callback_queue.put(('mic_level', min(1.0, volume_norm)))
-
-            self.mic_test_stream = sd.Stream(
-                device=(input_device_index, output_device_index),
-                samplerate=samplerate,
-                channels=1,
-                callback=audio_callback
-            )
-            self.mic_test_stream.start()
-            print("Mic loopback test started.")
-        except Exception as e:
-            print(f"Error starting mic test: {e}")
-            self.is_testing_mic = False
-
-    def stop_mic_test(self):
-        """Stops the microphone test."""
-        if not self.is_testing_mic:
-            return
-            
-        if self.mic_test_stream:
-            self.mic_test_stream.stop()
-            self.mic_test_stream.close()
-            self.mic_test_stream = None
-        self.is_testing_mic = False
-        print("Mic loopback test stopped.")
-
-    def play_test_sound(self, device_index):
-        """Plays a test sound on the specified output device."""
-        try:
-            samplerate = 44100
-            frequency = 440
-            duration = 1.0
-            t = np.linspace(0., duration, int(samplerate * duration), endpoint=False)
-            amplitude = 0.5
-            waveform = amplitude * np.sin(2. * np.pi * frequency * t)
-            
-            # Apply output volume
-            processed_waveform = waveform * self.output_volume
-            
-            print(f"Playing test sound on device {device_index} with volume {self.output_volume}")
-            sd.play(processed_waveform, samplerate, device=device_index, blocking=False)
-        except Exception as e:
-            print(f"Error playing test sound: {e}")
-
-    def set_volume(self, level, vol_type='input'):
-        """Sets the input or output volume gain level (0.0 to ...)."""
-        if vol_type == 'input':
-            self.input_volume = level
-            print(f"Set input volume to {level}")
-        elif vol_type == 'output':
-            self.output_volume = level
-            print(f"Set output volume to {level}")
-
-class MicrophoneStreamTrack(AudioStreamTrack):
-    def __init__(self, audio_manager, device_index):
-        super().__init__()
-        self.audio_manager = audio_manager
-        self.device_index = device_index
-        self.audio_queue = asyncio.Queue()
-        self.stream = None
-        self.running = False
-        self.muted = False
-
-    def set_muted(self, muted):
-        """Sets the muted state of the track."""
-        self.muted = muted
-
-    def start(self):
-        if self.running:
-            return
-        self.running = True
-        
-        def audio_callback(indata, frames, time, status):
-            if status:
-                print(f"MicrophoneStreamTrack status: {status}")
-            try:
-                self.audio_queue.put_nowait(indata.tobytes())
-            except asyncio.QueueFull:
-                pass # Drop frames if the queue is full
-
-        self.stream = sd.RawInputStream(
-            samplerate=48000,
-            blocksize=960, # 20ms of audio at 48kHz
-            device=self.device_index,
-            channels=1,
-            dtype='int16',
-            callback=audio_callback
-        )
-        self.stream.start()
-        print("MicrophoneStreamTrack started.")
-
-    def stop(self):
-        if not self.running:
-            return
-        self.running = False
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
-        print("MicrophoneStreamTrack stopped.")
-
-    async def recv(self):
-        if not self.running:
-            raise MediaStreamError
-
-        if self.muted:
-            # When muted, send a frame of silence.
-            # 960 samples * 2 bytes/sample (int16) = 1920 bytes
-            silent_data = b'\x00' * 1920
-            return self.audio_manager.resample_and_frame(silent_data, 48000, 960)
-
-        data = await self.audio_queue.get()
-        return self.audio_manager.resample_and_frame(data, 48000, 960)
-
-class AudioTrackPlayer:
-    def __init__(self, track, audio_manager, device_index):
-        self.track = track
-        self.audio_manager = audio_manager
-        self.device_index = device_index
-        self.stream = None
-        self.player_thread = None
-        self.running = False
-
-    def start(self):
-        if self.running:
-            return
-        self.running = True
-        
-        self.stream = sd.RawOutputStream(
-            samplerate=48000,
-            blocksize=960,
-            device=self.device_index,
-            channels=1,
-            dtype='int16'
-        )
-        self.stream.start()
-        
-        self.player_thread = threading.Thread(target=self.run, daemon=True)
-        self.player_thread.start()
-        print("AudioTrackPlayer started.")
-
-    def stop(self):
-        self.running = False
-        if self.player_thread:
-            self.player_thread.join()
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
-        print("AudioTrackPlayer stopped.")
-
-    def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def receive_frames():
-            while self.running:
-                try:
-                    frame = await self.track.recv()
-                    self.stream.write(frame.to_ndarray(format='s16', shape=(frame.samples, 1)))
-                except MediaStreamError:
-                    break
-                except Exception as e:
-                    print(f"Audio player error: {e}")
-                    break
-        
-        loop.run_until_complete(receive_frames())
-
-class WebRTCManager(threading.Thread):
-    def __init__(self, audio_manager, callback_queue):
-        super().__init__(daemon=True)
-        self.audio_manager = audio_manager
-        self.callback_queue = callback_queue
-        self.loop = None
-        self.peer_connections = {} # {peer_username: RTCPeerConnection}
-        self.audio_players = {} # {peer_username: AudioTrackPlayer}
-        self.mic_track = None
-        self.running = True
-
-    def run(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        try:
-            self.loop.run_forever()
-        finally:
-            self.loop.close()
-
-    def stop(self):
-        self.running = False
-        if self.loop:
-            future = asyncio.run_coroutine_threadsafe(self._shutdown(), self.loop)
-            future.result()
-            self.loop.call_soon_threadsafe(self.loop.stop)
-
-    async def _shutdown(self):
-        if self.mic_track:
-            self.mic_track.stop()
-        for player in self.audio_players.values():
-            player.stop()
-        for pc in self.peer_connections.values():
-            await pc.close()
-
-    def set_mute(self, is_muted):
-        """Toggles mute on the microphone track."""
-        if self.mic_track:
-            # This is called from the main Kivy thread.
-            # The mic_track's muted flag is accessed from the asyncio thread in recv().
-            # A simple boolean flag assignment is atomic in Python, so this is thread-safe.
-            self.mic_track.set_muted(is_muted)
-
-    async def _create_peer_connection(self, peer_username):
-        pc = RTCPeerConnection()
-        self.peer_connections[peer_username] = pc
-
-        @pc.on("track")
-        async def on_track(track):
-            print(f"Track {track.kind} received from {peer_username}")
-            if track.kind == "audio":
-                config = self.audio_manager.app.config_manager.load_config()
-                output_device_name = config.get('output_device_name', 'Default')
-                _, output_devices = self.audio_manager.get_devices()
-                device_index = output_devices.get(output_device_name, sd.default.device[1])
-                
-                player = AudioTrackPlayer(track, self.audio_manager, device_index)
-                self.audio_players[peer_username] = player
-                player.start()
-
-        @pc.on("connectionstatechange")
-        async def on_connectionstatechange():
-            print(f"Connection state for {peer_username} is {pc.connectionState}")
-            if pc.connectionState in ["failed", "closed", "disconnected"]:
-                if peer_username in self.audio_players:
-                    self.audio_players[peer_username].stop()
-                    del self.audio_players[peer_username]
-                if pc.connectionState == "failed":
-                    await pc.close()
-                    if peer_username in self.peer_connections:
-                        del self.peer_connections[peer_username]
-
-        return pc
-
-    def _start_mic(self):
-        if self.mic_track:
-            self.mic_track.stop()
-        
-        config = self.audio_manager.app.config_manager.load_config()
-        input_device_name = config.get('input_device_name', 'Default')
-        input_devices, _ = self.audio_manager.get_devices()
-        device_index = input_devices.get(input_device_name, sd.default.device[0])
-        
-        self.mic_track = MicrophoneStreamTrack(self.audio_manager, device_index)
-        self.mic_track.start()
-
-    def start_call(self, peer_username):
-        if not self.loop: return
-        future = asyncio.run_coroutine_threadsafe(self._start_call(peer_username), self.loop)
-        return future.result()
-
-    async def _start_call(self, peer_username):
-        self._start_mic()
-        pc = await self._create_peer_connection(peer_username)
-        pc.addTrack(self.mic_track)
-        
-        offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        
-        sdp_offer = {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-        self.callback_queue.put(('webrtc_offer_created', {'peer': peer_username, 'offer': sdp_offer}))
-
-    def handle_offer(self, peer_username, offer_sdp):
-        if not self.loop: return
-        future = asyncio.run_coroutine_threadsafe(self._handle_offer(peer_username, offer_sdp), self.loop)
-        return future.result()
-
-    async def _handle_offer(self, peer_username, offer_sdp):
-        self._start_mic()
-        pc = await self._create_peer_connection(peer_username)
-        
-        offer = RTCSessionDescription(sdp=offer_sdp["sdp"], type=offer_sdp["type"])
-        await pc.setRemoteDescription(offer)
-        
-        pc.addTrack(self.mic_track)
-        
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        
-        sdp_answer = {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-        self.callback_queue.put(('webrtc_answer_created', {'peer': peer_username, 'answer': sdp_answer}))
-        
-    def handle_answer(self, peer_username, answer_sdp):
-        if not self.loop: return
-        asyncio.run_coroutine_threadsafe(self._handle_answer(peer_username, answer_sdp), self.loop)
-        
-    async def _handle_answer(self, peer_username, answer_sdp):
-        pc = self.peer_connections.get(peer_username)
-        if pc:
-            answer = RTCSessionDescription(sdp=answer_sdp["sdp"], type=answer_sdp["type"])
-            await pc.setRemoteDescription(answer)
-
-    async def _close_peer_connection(self, peer_username):
-        if peer_username in self.peer_connections:
-            pc = self.peer_connections[peer_username]
-            await pc.close()
-            del self.peer_connections[peer_username]
-            
-    def end_call(self, peer_username):
-        if not self.loop: return
-        asyncio.run_coroutine_threadsafe(self._close_peer_connection(peer_username), self.loop)
-    
-class ConfigManager:
-    def __init__(self, key_path='secret.key', config_path='config.dat'):
-        self.key_path = key_path
-        self.config_path = config_path
-        self.key = self.load_or_generate_key()
-        self.cipher = Fernet(self.key)
-
-    def load_or_generate_key(self):
-        """Загружает ключ шифрования или генерирует новый, если он не найден."""
-        if os.path.exists(self.key_path):
-            with open(self.key_path, 'rb') as f:
-                return f.read()
-        else:
-            key = Fernet.generate_key()
-            with open(self.key_path, 'wb') as f:
-                f.write(key)
-            return key
-
-    def save_config(self, config_data):
-        """Шифрует и сохраняет данные конфигурации."""
-        try:
-            # Сериализуем словарь в JSON-строку, затем в байты
-            data_bytes = json.dumps(config_data).encode('utf-8')
-            encrypted_data = self.cipher.encrypt(data_bytes)
-            with open(self.config_path, 'wb') as f:
-                f.write(encrypted_data)
-            return True
-        except Exception as e:
-            print(f"Ошибка при сохранении конфигурации: {e}")
-            return False
-
-    def load_config(self):
-        """Загружает и расшифровывает данные конфигурации."""
-        if not os.path.exists(self.config_path):
-            return {}  # Возвращаем пустой словарь, если конфига нет
-
-        try:
-            with open(self.config_path, 'rb') as f:
-                encrypted_data = f.read()
-            
-            decrypted_data_bytes = self.cipher.decrypt(encrypted_data)
-            # Десериализуем из байтов в JSON-строку, затем в словарь
-            config_data = json.loads(decrypted_data_bytes.decode('utf-8'))
-            return config_data
-        except Exception as e:
-            print(f"Ошибка при загрузке или расшифровке конфигурации: {e}")
-            # Если расшифровка не удалась (например, ключ изменился), возвращаем пустой конфиг
-            return {}
-    
-class ServerManager(threading.Thread):
-    def __init__(self, host, port, username, password, chat_history):
-        super().__init__(daemon=True)
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self.chat_history = chat_history # Reference to the main app's history
-        self.sock = None
-        self.running = True
-        self.callbacks = {}
-        self.zstd_c = zstd.ZstdCompressor()
-        self.zstd_d = zstd.ZstdDecompressor()
-
-    def register_callback(self, event_name, func):
-        self.callbacks[event_name] = func
-
-    def _trigger_callback(self, event_name, *args):
-        if event_name in self.callbacks:
-            self.callbacks[event_name](*args)
-
-    def run(self):
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            self.login()
-            self.listen_for_messages()
-        except Exception as e:
-            print(f"ServerManager Error: {e}")
-            self._trigger_callback('connection_failed', str(e))
-        finally:
-            if self.sock:
-                self.sock.close()
-
-    def listen_for_messages(self):
-        unpacker = msgpack.Unpacker(raw=False)
-        while self.running:
-            try:
-                data = self.sock.recv(4096)
-                if not data:
-                    break
-                
-                # Decompress the received chunk immediately
-                try:
-                    decompressed_data = self.zstd_d.decompress(data)
-                    unpacker.feed(decompressed_data)
-                    for unpacked in unpacker:
-                        self.handle_command(unpacked)
-                except zstd.ZstdError:
-                    # This might happen if we receive a partial compressed frame.
-                    # A more robust solution would buffer compressed chunks.
-                    # For now, we assume each recv() gets at least one full message.
-                    print("Warning: Could not decompress chunk, might be partial.")
-                    continue
-
-            except (ConnectionResetError, ConnectionAbortedError):
-                print("Connection to server lost.")
-                break
-            except Exception as e:
-                print(f"Error receiving data from server: {e}")
-                break
-        self._trigger_callback('disconnected')
-
-    def _send_command(self, command, payload=None):
-        if not self.sock:
-            return
-        try:
-            message = {'command': command, 'payload': payload or {}}
-            packed_message = msgpack.packb(message, use_bin_type=True)
-            compressed_message = self.zstd_c.compress(packed_message)
-            self.sock.sendall(compressed_message)
-        except Exception as e:
-            print(f"Error sending command '{command}': {e}")
-
-    def handle_command(self, message):
-        try:
-            command = message.get('command')
-            payload = message.get('payload')
-
-            if command == 'login_success':
-                # We don't really need to do anything here, but it's good to have.
-                pass
-            elif command == 'login_failed':
-                self._trigger_callback('login_failed', payload)
-            elif command == 'info':
-                self._trigger_callback('info_received', payload)
-            elif command == 'user_list_update':
-                self._trigger_callback('user_list_update', payload.get('users'))
-            elif command == 'group_message':
-                self._trigger_callback('group_message_received', payload.get('group_id'), payload.get('message_data'))
-            elif command == 'group_created':
-                 self._trigger_callback('group_created', payload.get('group_id'), payload.get('group_name'), payload.get('admin'))
-            elif command == 'group_invite':
-                self._trigger_callback('incoming_group_invite', payload.get('group_id'), payload.get('group_name'), payload.get('admin'))
-            elif command == 'group_invite_response':
-                 self._trigger_callback('group_invite_response', payload.get('group_id'), payload.get('username'), payload.get('accepted'))
-            elif command == 'user_joined_group':
-                self._trigger_callback('group_joined', payload.get('group_id'), payload.get('username'))
-            elif command == 'history_response':
-                self._trigger_callback('history_received', payload.get('chat_id'), payload.get('history'))
-            elif command == 'initial_data':
-                self._trigger_callback('initial_data_received', payload.get('groups'), payload.get('users'))
-            elif command == 'incoming_group_call':
-                self._trigger_callback('incoming_group_call', payload.get('group_id'), payload.get('admin'), payload.get('sample_rate'))
-            elif command == 'user_joined_call':
-                self._trigger_callback('user_joined_call', payload.get('group_id'), payload.get('username'))
-            elif command == 'user_left_call':
-                self._trigger_callback('user_left_call', payload.get('group_id'), payload.get('username'))
-            elif command == 'user_kicked':
-                self._trigger_callback('user_kicked', payload.get('group_id'), payload.get('kicked_user'), payload.get('admin'))
-
-
-        except Exception as e:
-            print(f"Error handling server command: {e} - Message: {message}")
-
-    def login(self):
-        self._send_command('login', {'username': self.username, 'password': self.password})
-
-    def send_group_message(self, group_id, message_data):
-        self._send_command('group_message', {'group_id': group_id, 'message_data': message_data})
-
-    def create_group(self, group_name):
-        self._send_command('create_group', {'group_name': group_name})
-
-    def invite_to_group(self, group_id, target_username):
-        self._send_command('invite_to_group', {'group_id': group_id, 'username': target_username})
-
-    def send_group_invite_response(self, group_id, accepted):
-        self._send_command('group_invite_response', {'group_id': group_id, 'accepted': accepted})
-        
-    def request_history(self, chat_id):
-        self._send_command('request_history', {'chat_id': chat_id})
-
-    def start_group_call(self, group_id, sample_rate):
-        self._send_command('start_group_call', {'group_id': group_id, 'sample_rate': sample_rate})
-
-    def join_group_call(self, group_id, udp_addr):
-        self._send_command('join_group_call', {'group_id': group_id, 'udp_addr': udp_addr})
-
-    def leave_group_call(self, group_id):
-        self._send_command('leave_group_call', {'group_id': group_id})
-
-    def kick_user_from_group(self, group_id, username):
-        self._send_command('kick_from_group', {'group_id': group_id, 'username': username})
-
-    def stop(self):
-        self.running = False
-        if self.sock:
-            try:
-                self.sock.shutdown(socket.SHUT_RDWR)
-                self.sock.close()
-            except OSError:
-                pass
-        print("ServerManager stopped.")
-    
-    
-# --- UI-Agnostic Threads ---
-
-
-
-# --- Kivy Popups & Widgets ---
-
-
-class TitleBar(MDBoxLayout):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.size_hint_y = None
-        self.height = dp(30)
-        self.bind(on_touch_down=self.on_touch_down_title)
-        self.bind(on_touch_move=self.on_touch_move_title)
-
-    def on_touch_down_title(self, instance, touch):
-        if self.collide_point(*touch.pos):
-            touch.grab(self)
-            self.start_pos = touch.pos
-            self.start_window_pos = Window.left, Window.top
-            return True
-
-    def on_touch_move_title(self, instance, touch):
-        if touch.grab_current is self:
-            dx = touch.x - self.start_pos[0]
-            dy = touch.y - self.start_pos[1]
-            Window.left = self.start_window_pos[0] + dx
-            Window.top = self.start_window_pos[1] + dy
-
-class RootLayout(MDBoxLayout): pass
-class ChatLayout(MDBoxLayout): pass
-
-class CallPopup(MDDialog):
-    def __init__(self, peer_username, translator, **kwargs):
-        self.tr = translator
-        self.is_muted = False
-        
-        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
-        content_layout.bind(minimum_height=content_layout.setter('height'))
-        
-        content_layout.add_widget(MDLabel(text=self.tr.get('call_label', peer_username=peer_username), halign='center'))
-        
-        self.mute_button = MDRaisedButton(text=self.tr.get('mute_button'))
-        self.mute_button.bind(on_press=self.toggle_mute)
-        content_layout.add_widget(self.mute_button)
-        
-        super().__init__(
-            title=self.tr.get('call_title', 'Call'),
-            type="custom",
-            content_cls=content_layout,
-            buttons=[
-                MDRaisedButton(text=self.tr.get('hang_up_button'), on_release=self.hang_up)
-            ],
-            auto_dismiss=False,
-            **kwargs
-        )
-        self.register_event_type('on_mute_toggle')
-
-    def toggle_mute(self, instance):
-        self.is_muted = not self.is_muted
-        self.mute_button.text = self.tr.get('unmute_button') if self.is_muted else self.tr.get('mute_button')
-        self.dispatch('on_mute_toggle', self.is_muted)
-
-    def hang_up(self, instance):
-        self.dismiss()
-
-    def on_mute_toggle(self, is_muted):
-        pass
-
-class ContactRequestPopup(MDDialog):
-    def __init__(self, username, translator, **kwargs):
-        self.tr = translator
-        
-        accept_btn = MDRaisedButton(text=self.tr.get('accept_button', 'Accept'))
-        decline_btn = MDFlatButton(text=self.tr.get('decline_button', 'Decline'))
-        
-        super().__init__(
-            title=self.tr.get('contact_request_title', 'Contact Request'),
-            text=self.tr.get('contact_request_text', username=username),
-            buttons=[accept_btn, decline_btn],
-            auto_dismiss=False,
-            **kwargs
-        )
-        
-        accept_btn.bind(on_press=self.accept)
-        decline_btn.bind(on_press=self.decline)
-        
-        self.register_event_type('on_response')
-
-    def accept(self, instance):
-        self.dispatch('on_response', True)
-        self.dismiss()
-
-    def decline(self, instance):
-        self.dispatch('on_response', False)
-        self.dismiss()
-
-    def on_response(self, accepted):
-        pass
-
-# The EmojiPopup class is no longer needed and will be removed.
-# The functionality will be integrated into the main app class.
-
-class PasswordPromptPopup(MDDialog):
-    def __init__(self, username, translator, **kwargs):
-        self.tr = translator
-        
-        self.password_input = MDTextField(multiline=False, password=True, hint_text="Password")
-        
-        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
-        content_layout.add_widget(MDLabel(text=self.tr.get('password_prompt_text', username=username)))
-        content_layout.add_widget(self.password_input)
-        content_layout.height = "120dp" # Adjust height for content
-
-        ok_btn = MDRaisedButton(text=self.tr.get('ok_button', 'OK'))
-        cancel_btn = MDFlatButton(text=self.tr.get('cancel_button', 'Cancel'))
-
-        super().__init__(
-            title=self.tr.get('password_prompt_title', 'Password Required'),
-            type="custom",
-            content_cls=content_layout,
-            buttons=[ok_btn, cancel_btn],
-            auto_dismiss=False,
-            **kwargs
-        )
-        
-        ok_btn.bind(on_press=self.submit)
-        cancel_btn.bind(on_press=self.cancel)
-        
-        self.register_event_type('on_submit')
-
-    def submit(self, instance):
-        self.dispatch('on_submit', self.password_input.text)
-        self.dismiss()
-
-    def cancel(self, instance):
-        self.dispatch('on_submit', None) # Indicate cancellation
-        self.dismiss()
-
-    def on_submit(self, password):
-        pass
-
-class GroupCallPopup(MDDialog):
-    def __init__(self, group_name, translator, **kwargs):
-        self.tr = translator
-        
-        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
-        content_layout.bind(minimum_height=content_layout.setter('height'))
-        content_layout.add_widget(MDLabel(text=self.tr.get('participants_label', 'Participants:'), halign='center'))
-        self.participants_list = MDBoxLayout(orientation='vertical', size_hint_y=None)
-        self.participants_list.bind(minimum_height=self.participants_list.setter('height'))
-        content_layout.add_widget(self.participants_list)
-        
-        hang_up_button = MDRaisedButton(text=self.tr.get('hang_up_button'))
-        hang_up_button.bind(on_press=self.hang_up)
-        
-        super().__init__(
-            title=self.tr.get('group_call_title', group_name=group_name),
-            type="custom",
-            content_cls=content_layout,
-            buttons=[hang_up_button],
-            auto_dismiss=False,
-            **kwargs
-        )
-
-    def hang_up(self, instance):
-        self.dismiss()
-
-
-class ManageGroupPopup(MDDialog):
-    def __init__(self, translator, members, **kwargs):
-        self.tr = translator
-        self.members = members
-        self.register_event_type('on_kick_user')
-        self.register_event_type('on_invite_user')
-
-        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
-        content_layout.bind(minimum_height=content_layout.setter('height'))
-
-        scroll_view = ScrollView(size_hint_y=None, height="300dp")
-        scroll_content = MDBoxLayout(orientation='vertical', size_hint_y=None, spacing="5dp")
-        scroll_content.bind(minimum_height=scroll_content.setter('height'))
-
-        for member in self.members:
-            member_layout = MDBoxLayout(size_hint_y=None, height=dp(40))
-            member_label = MDLabel(text=member)
-            kick_button = MDRaisedButton(text=self.tr.get('kick_button', 'Kick'), size_hint_x=None, width=dp(80))
-            kick_button.bind(on_press=partial(self.kick_user, member))
-            member_layout.add_widget(member_label)
-            member_layout.add_widget(kick_button)
-            scroll_content.add_widget(member_layout)
-
-        scroll_view.add_widget(scroll_content)
-        content_layout.add_widget(scroll_view)
-
-        invite_button = MDRaisedButton(text=self.tr.get('invite_button', 'Invite'))
-        invite_button.bind(on_press=self.invite_user)
-
-        close_button = MDFlatButton(text=self.tr.get('close_button', 'Close'))
-        close_button.bind(on_press=lambda x: self.dismiss())
-
-        super().__init__(
-            title=self.tr.get('manage_group_title', 'Manage Group'),
-            type="custom",
-            content_cls=content_layout,
-            buttons=[invite_button, close_button],
-            **kwargs
-        )
-
-    def invite_user(self, instance):
-        self.dispatch('on_invite_user')
-        self.dismiss()
-
-    def on_invite_user(self):
-        pass
-
-    def kick_user(self, username, instance):
-        self.dispatch('on_kick_user', username)
-        self.dismiss()
-
-    def on_kick_user(self, username):
-        pass
-
-
-class AudioMessageWidget(MDBoxLayout):
-    def __init__(self, filepath, sender, tr, **kwargs):
-        super().__init__(**kwargs)
-        self.tr = tr
-        self.filepath = filepath
-        self.sound = SoundLoader.load(filepath)
-        self.orientation = 'horizontal'
-        self.size_hint_y = None
-        self.height = dp(40)
-        
-        self.label = MDLabel(text=self.tr.get('audio_from_sender', "Audio from {sender}", sender=sender))
-        self.play_button = MDIconButton(icon='play')
-        self.play_button.bind(on_press=self.toggle_play)
-        
-        self.add_widget(self.label)
-        self.add_widget(self.play_button)
-
-    def toggle_play(self, instance):
-        if not self.sound:
-            return
-        if self.sound.state == 'play':
-            self.sound.stop()
-            self.play_button.icon = 'play'
-        else:
-            self.sound.play()
-            self.play_button.icon = 'pause'
-            self.sound.bind(on_stop=self.on_sound_stop)
-
-    def on_sound_stop(self, instance):
-        self.play_button.icon = 'play'
-
-
-class ModeSelectionPopup(MDDialog):
-    def __init__(self, translator, **kwargs):
-        self.tr = translator
-        self.mode = None
-
-        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
-        content_layout.bind(minimum_height=content_layout.setter('height'))
-        content_layout.add_widget(MDLabel(text=self.tr.get('mode_selection_label'), halign='center'))
-
-        modes = {
-            'p2p_internet': self.tr.get('mode_p2p_internet'),
-            'p2p_local': self.tr.get('mode_p2p_local'),
-            'p2p_bluetooth': self.tr.get('mode_p2p_bluetooth', 'P2P (Bluetooth)'),
-            'server': self.tr.get('mode_client_server')
-        }
-
-        for mode_id, mode_text in modes.items():
-            btn = MDRaisedButton(text=mode_text)
-            btn.bind(on_press=partial(self.select_mode, mode_id))
-            content_layout.add_widget(btn)
-
-        super().__init__(
-            title=self.tr.get('mode_selection_title'),
-            type="custom",
-            content_cls=content_layout,
-            auto_dismiss=False,
-            **kwargs
-        )
-
-    def select_mode(self, mode, instance):
-        self.mode = mode
-        self.dismiss()
-
-class UsernamePopup(MDDialog):
-    def __init__(self, translator, current_username, **kwargs):
-        self.tr = translator
-        self.username_input = MDTextField(text=current_username, multiline=False, hint_text=self.tr.get('username_dialog_label'))
-        ok_button = MDRaisedButton(text=self.tr.get('ok_button', 'OK'))
-        
-        super().__init__(
-            title=self.tr.get('username_dialog_title'),
-            type="custom",
-            content_cls=self.username_input,
-            buttons=[ok_button],
-            auto_dismiss=False,
-            **kwargs
-        )
-        ok_button.bind(on_press=self.validate_username)
-
-    def validate_username(self, instance):
-        username = self.username_input.text.strip()
-        if username:
-            self.username = username
-            self.dismiss()
-
-class ServerLoginPopup(MDDialog):
-    def __init__(self, translator, config, **kwargs):
-        self.tr = translator
-        server_config = config.get('server', {})
-        
-        content_layout = MDBoxLayout(orientation='vertical', spacing="10dp", size_hint_y=None)
-        content_layout.height = "200dp"
-        
-        self.ip_input = MDTextField(text=server_config.get('host', '127.0.0.1'), hint_text=self.tr.get('server_ip_label', 'Server IP:'))
-        self.port_input = MDTextField(text=str(server_config.get('port', 12345)), hint_text=self.tr.get('server_port_label', 'Server Port:'))
-        self.password_input = MDTextField(text='', password=True, hint_text=self.tr.get('server_password_label', 'Password (optional):'))
-        
-        content_layout.add_widget(self.ip_input)
-        content_layout.add_widget(self.port_input)
-        content_layout.add_widget(self.password_input)
-        
-        connect_button = MDRaisedButton(text=self.tr.get('connect_button', 'Connect'))
-        
-        super().__init__(
-            title=self.tr.get('server_login_title', 'Connect to Server'),
-            type="custom",
-            content_cls=content_layout,
-            buttons=[connect_button],
-            auto_dismiss=False,
-            **kwargs
-        )
-        connect_button.bind(on_press=self.connect)
-
-    def connect(self, instance):
-        self.server_ip = self.ip_input.text.strip()
-        self.server_port = self.port_input.text.strip()
-        self.password = self.password_input.text
-        
-        if not self.server_ip or not self.server_port:
-            # Maybe show an error label
-            return
-            
-        try:
-            self.server_port = int(self.server_port)
-            self.dismiss()
-        except ValueError:
-            # Maybe show an error label
-            pass
-
-class SettingsTab(MDBoxLayout, MDTabsBase):
-    pass
-
-class SettingsPopup(MDDialog):
-    def __init__(self, translator, config, app, **kwargs):
-        self.app = app
-        self.tr = translator
-        self.config = config
-        self.new_hotkey = set()
-        self.recording = False
-        self.listener = None
-        self.is_testing = False
-        self.saved = False
-        self.language_menu = None
-        self.input_device_menu = None
-        self.output_device_menu = None
-        
-        # --- Main Layout ---
-        content_layout = MDBoxLayout(orientation='vertical', size_hint_y=None)
-        content_layout.bind(minimum_height=content_layout.setter('height'))
-        
-        tab_panel = MDTabs()
-        tab_panel.add_widget(self.create_general_tab())
-        tab_panel.add_widget(self.create_hotkeys_tab())
-        tab_panel.add_widget(self.create_audio_tab())
-        tab_panel.add_widget(self.create_security_tab())
-        tab_panel.add_widget(self.create_plugins_tab())
-        content_layout.add_widget(tab_panel)
-
-        save_btn = MDRaisedButton(text=self.tr.get('save_button'))
-        save_btn.bind(on_press=self.save_and_dismiss)
-        cancel_btn = MDFlatButton(text=self.tr.get('cancel_button', 'Cancel'))
-        cancel_btn.bind(on_press=self.cancel_and_dismiss)
-
-        super().__init__(
-            title=self.tr.get('settings_title', 'Settings'),
-            type="custom",
-            content_cls=content_layout,
-            buttons=[save_btn, cancel_btn],
-            auto_dismiss=False,
-            **kwargs
-        )
-        
-    def create_general_tab(self):
-        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
-        layout.add_widget(MDLabel(text=self.tr.get('language_label', 'Language'), font_style='H6'))
-
-        available_languages = {'en': 'English', 'ru': 'Русский'}
-        current_lang_code = self.app.tr.get_language()
-        current_lang_name = available_languages.get(current_lang_code, 'English')
-        
-        self.language_button = MDRaisedButton(text=current_lang_name)
-        self.language_button.bind(on_release=self.open_language_menu)
-        layout.add_widget(self.language_button)
-        
-        menu_items = [
-            {"text": name, "viewclass": "OneLineListItem", "on_release": lambda x=code: self.set_language(x)}
-            for code, name in available_languages.items()
-        ]
-        self.language_menu = MDDropdownMenu(caller=self.language_button, items=menu_items, width_mult=4)
-        self.selected_language = current_lang_code
-
-        layout.add_widget(MDBoxLayout()) # Spacer
-        
-        return_button = MDRaisedButton(text=self.tr.get('return_to_main_menu_button', 'Return to Main Menu'), size_hint_y=None, height=dp(44))
-        return_button.bind(on_press=self.app.return_to_main_menu)
-        layout.add_widget(return_button)
-        
-        return SettingsTab(layout, title=self.tr.get('general_tab', 'General'))
-
-    def open_language_menu(self, button):
-        self.language_menu.open()
-
-    def set_language(self, lang_code):
-        self.selected_language = lang_code
-        self.language_button.text = self.language_menu.items[0]['text'] if lang_code == 'en' else self.language_menu.items[1]['text']
-        self.language_menu.dismiss()
-
-    def create_hotkeys_tab(self):
-        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
-        layout.add_widget(MDLabel(text=self.tr.get('hotkey_settings_title', 'Mute Hotkey'), font_style='H6'))
-        current_hotkey_str = self.config.get('hotkeys', {}).get('mute', 'ctrl+m')
-        layout.add_widget(MDLabel(text=self.tr.get('hotkey_mute_label')))
-        self.hotkey_label = MDLabel(text=current_hotkey_str)
-        layout.add_widget(self.hotkey_label)
-        self.record_button = MDRaisedButton(text=self.tr.get('hotkey_record_button'))
-        self.record_button.bind(on_press=self.toggle_record)
-        layout.add_widget(self.record_button)
-        return SettingsTab(layout, title=self.tr.get('hotkeys_tab', 'Hotkeys'))
-
-    def create_audio_tab(self):
-        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
-        layout.add_widget(MDLabel(text=self.tr.get('audio_settings_title', 'Audio Settings'), font_style='H6'))
-
-        input_devices, output_devices = self.app.audio_manager.get_devices()
-        self.input_device_map = input_devices
-        self.output_device_map = output_devices
-
-        layout.add_widget(MDLabel(text=self.tr.get('input_device_label', 'Input Device (Microphone)')))
-        self.input_device_button = MDRaisedButton(text=self.config.get('input_device_name', 'Default'))
-        self.input_device_button.bind(on_release=self.open_input_device_menu)
-        layout.add_widget(self.input_device_button)
-        
-        input_menu_items = [{"text": name, "viewclass": "OneLineListItem", "on_release": lambda x=name: self.set_input_device(x)} for name in input_devices.keys()]
-        self.input_device_menu = MDDropdownMenu(caller=self.input_device_button, items=input_menu_items, width_mult=4)
-
-        layout.add_widget(MDLabel(text=self.tr.get('output_device_label', 'Output Device (Speakers)')))
-        self.output_device_button = MDRaisedButton(text=self.config.get('output_device_name', 'Default'))
-        self.output_device_button.bind(on_release=self.open_output_device_menu)
-        layout.add_widget(self.output_device_button)
-
-        output_menu_items = [{"text": name, "viewclass": "OneLineListItem", "on_release": lambda x=name: self.set_output_device(x)} for name in output_devices.keys()]
-        self.output_device_menu = MDDropdownMenu(caller=self.output_device_button, items=output_menu_items, width_mult=4)
-
-        layout.add_widget(MDLabel(text=self.tr.get('input_volume_label', 'Input Volume')))
-        self.input_volume_slider = MDSlider(min=0, max=100, value=self.config.get('input_volume', 80))
-        layout.add_widget(self.input_volume_slider)
-
-        layout.add_widget(MDLabel(text=self.tr.get('output_volume_label', 'Output Volume')))
-        self.output_volume_slider = MDSlider(min=0, max=100, value=self.config.get('output_volume', 80))
-        layout.add_widget(self.output_volume_slider)
-
-        test_layout = MDBoxLayout(spacing="10dp", size_hint_y=None, height=dp(44))
-        self.mic_test_button = MDRaisedButton(text=self.tr.get('mic_test_button', 'Test Microphone'))
-        self.mic_test_button.bind(on_press=self.toggle_mic_test)
-        self.mic_level_bar = MDProgressBar(max=1.0, value=0, size_hint_x=1.5)
-        test_layout.add_widget(self.mic_test_button)
-        test_layout.add_widget(self.mic_level_bar)
-        layout.add_widget(test_layout)
-        
-        speaker_test_button = MDRaisedButton(text=self.tr.get('speaker_test_button', 'Test Speakers'), size_hint_y=None, height=dp(44))
-        speaker_test_button.bind(on_press=self.test_speakers)
-        layout.add_widget(speaker_test_button)
-
-        return SettingsTab(layout, title=self.tr.get('audio_tab', 'Audio'))
-
-    def open_input_device_menu(self, button):
-        self.input_device_menu.open()
-
-    def set_input_device(self, device_name):
-        self.input_device_button.text = device_name
-        self.input_device_menu.dismiss()
-        self.on_device_change()
-        
-    def open_output_device_menu(self, button):
-        self.output_device_menu.open()
-        
-    def set_output_device(self, device_name):
-        self.output_device_button.text = device_name
-        self.output_device_menu.dismiss()
-
-    def on_device_change(self):
-        if self.is_testing:
-            self.app.audio_manager.stop_mic_test()
-            input_device_index = self.input_device_map.get(self.input_device_button.text, sd.default.device[0])
-            output_device_index = self.output_device_map.get(self.output_device_button.text, sd.default.device[1])
-            self.app.audio_manager.start_mic_test(input_device_index, output_device_index)
-
-    def toggle_mic_test(self, instance):
-        self.is_testing = not self.is_testing
-        if self.is_testing:
-            self.mic_test_button.text = self.tr.get('mic_test_stop_button', 'Stop Test')
-            input_device_index = self.input_device_map.get(self.input_device_button.text, sd.default.device[0])
-            output_device_index = self.output_device_map.get(self.output_device_button.text, sd.default.device[1])
-            self.app.audio_manager.start_mic_test(input_device_index, output_device_index)
-        else:
-            self.mic_test_button.text = self.tr.get('mic_test_button', 'Test Microphone')
-            self.app.audio_manager.stop_mic_test()
-            self.mic_level_bar.value = 0
-
-    def test_speakers(self, instance):
-        device_index = self.output_device_map.get(self.output_device_button.text, sd.default.device[1])
-        threading.Thread(target=self.app.audio_manager.play_test_sound, args=(device_index,), daemon=True).start()
-
-    def create_security_tab(self):
-        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
-        layout.add_widget(MDLabel(text=self.tr.get('p2p_password_label', 'P2P Connection Password'), font_style='H6'))
-        layout.add_widget(MDLabel(text=self.tr.get('p2p_password_desc', 'Require a password for incoming P2P connections.')))
-        self.p2p_password_input = MDTextField(
-            text=self.config.get('security', {}).get('p2p_password', ''),
-            password=True
-        )
-        layout.add_widget(self.p2p_password_input)
-        return SettingsTab(layout, title=self.tr.get('security_tab', 'Security'))
-
-    def create_plugins_tab(self):
-        layout = MDBoxLayout(orientation='vertical', spacing="10dp", padding="10dp")
-        scroll_view = ScrollView()
-        scroll_content = MDGridLayout(cols=1, size_hint_y=None, spacing="10dp")
-        scroll_content.bind(minimum_height=scroll_content.setter('height'))
-
-        self.plugin_switches = {}
-        if self.app.plugin_manager and self.app.plugin_manager.plugins:
-            for plugin in self.app.plugin_manager.plugins:
-                plugin_layout = MDBoxLayout(size_hint_y=None, height=dp(60))
-                info_layout = MDBoxLayout(orientation='vertical')
-                info_layout.add_widget(MDLabel(text=plugin['name'], font_style='Subtitle1'))
-                info_layout.add_widget(MDLabel(text=plugin['description'], font_style='Caption', theme_text_color="Secondary"))
-                switch = MDSwitch(active=plugin['enabled'])
-                self.plugin_switches[plugin['id']] = switch
-                plugin_layout.add_widget(info_layout)
-                plugin_layout.add_widget(switch)
-                scroll_content.add_widget(plugin_layout)
-        else:
-            scroll_content.add_widget(MDLabel(text=self.tr.get('no_plugins_found', 'No plugins found.')))
-
-        scroll_view.add_widget(scroll_content)
-        layout.add_widget(scroll_view)
-        return SettingsTab(layout, title=self.tr.get('plugins_tab', 'Plugins'))
-
-    def toggle_record(self, instance):
-        self.recording = not self.recording
-        if self.recording:
-            self.new_hotkey = set()
-            self.hotkey_label.text = self.tr.get('hotkey_recording_prompt')
-            self.record_button.text = self.tr.get('hotkey_stop_record_button')
-            self.start_listener()
-        else:
-            self.record_button.text = self.tr.get('hotkey_record_button')
-            self.stop_listener()
-
-    def on_press(self, key):
-        if self.recording:
-            self.new_hotkey.add(key)
-            self.hotkey_label.text = ' + '.join(self.key_to_str(k) for k in self.new_hotkey)
-
-    def on_release(self, key):
-        if self.recording:
-            self.toggle_record(None)
-
-    def start_listener(self):
-        if not self.listener:
-            self.listener = keyboard.Listener(on_press=self.on_press, on_release=self.on_release)
-            self.listener.start()
-
-    def stop_listener(self):
-        if self.listener:
-            self.listener.stop()
-            self.listener = None
-
-    def save_and_dismiss(self, instance):
-        self.stop_listener()
-        if self.is_testing:
-            self.toggle_mic_test(None)
-        self.hotkey = self.new_hotkey
-        self.saved = True
-        
-        self.config['language'] = self.selected_language
-        self.config['input_device_name'] = self.input_device_button.text
-        self.config['output_device_name'] = self.output_device_button.text
-        self.config['input_volume'] = self.input_volume_slider.value
-        self.config['output_volume'] = self.output_volume_slider.value
-
-        if 'security' not in self.config:
-            self.config['security'] = {}
-        self.config['security']['p2p_password'] = self.p2p_password_input.text
-
-        restart_required = False
-        if hasattr(self, 'plugin_switches'):
-            for plugin in self.app.plugin_manager.plugins:
-                plugin_id = plugin['id']
-                switch = self.plugin_switches.get(plugin_id)
-                if switch is None: continue
-                if plugin['enabled'] != switch.active:
-                    restart_required = True
-                    py_file_path = os.path.join(plugin['path'], f"{plugin['module_name']}.py")
-                    disabled_py_file_path = py_file_path + '.disabled'
-                    try:
-                        if switch.active and os.path.exists(disabled_py_file_path):
-                            os.rename(disabled_py_file_path, py_file_path)
-                        elif not switch.active and os.path.exists(py_file_path):
-                            os.rename(py_file_path, disabled_py_file_path)
-                    except Exception as e:
-                        print(f"Error changing plugin state for {plugin['name']}: {e}")
-
-        if restart_required:
-            self.app.show_popup(
-                self.tr.get('restart_required_title', 'Restart Required'),
-                self.tr.get('restart_required_message', 'Plugin changes will take effect after restarting the application.')
-            )
-        self.dismiss()
-
-    def cancel_and_dismiss(self, instance):
-        self.stop_listener()
-        self.dismiss()
-
-    @staticmethod
-    def key_to_str(key):
-        if isinstance(key, keyboard.Key): return key.name
-        elif isinstance(key, keyboard.KeyCode): return key.char
-        return str(key)
-
-
-
-class VoiceChatApp(MDApp):
-    def build(self):
+# Flet-based VoiceChat Application
+# Setup basic logging at the top level to ensure it's configured first.
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class VoiceChatApp:
+    def __init__(self, page: ft.Page):
+        self.page = page
+        logging.info("VoiceChatApp initializing...")
+
+        # Initialize all the same managers (UI agnostic!)
         self.config_manager = ConfigManager()
         self.tr = Translator(self.config_manager)
-        self.icon = 'JustMessenger.png'
-        
-        # KivyMD Theme Setup
-        self.theme_cls.theme_style = "Dark" # Or "Light"
-        self.theme_cls.primary_palette = "Purple"
-        self.theme_cls.accent_palette = "Gray"
-        
-        # Register custom fonts
-        fonts_path = "./fonts/"
-        LabelBase.register(
-            name="Roboto",
-            fn_regular=os.path.join(fonts_path, "Roboto-Regular.ttf"),
-            fn_bold=os.path.join(fonts_path, "Roboto-Bold.ttf")
-        )
-        LabelBase.register(
-            name="NotoSans",
-            fn_regular=os.path.join(fonts_path, "NotoSans-Regular.ttf")
-        )
-        LabelBase.register(
-            name="EmojiFont",
-            fn_regular=os.path.join(fonts_path, "NotoColorEmoji.ttf")
-        )
-        
-        self.theme_cls.font_styles["Regular"] = [
-            "Roboto",
-            16,
-            False,
-            0.15,
-        ]
-
-        return RootLayout()
-
-    def on_start(self):
-        self.p2p_manager = None
-        self.server_manager = None
-        self.bluetooth_manager = None
-        self.username = None
-        self.mode = None
-        self.server_groups = {} # {group_id: {name, admin, members}}
-        self.active_group_call = None # Stores group_id of the active call
-        self.pending_group_call_punches = set()
-        self.call_popup = None
-        self.group_call_popup = None
-        self.current_peer_addr = None
-        self.pending_call_target = None
-        self.negotiated_rate = None
         self.callback_queue = queue.Queue()
-        self.audio_manager = AudioManager(self, self.callback_queue)
-        self.webrtc_manager = WebRTCManager(self.audio_manager, self.callback_queue)
-        self.hotkey_manager = HotkeyManager()
-        self.is_muted = False
-        self.plugin_manager = None
-        self.emoji_manager = None
-        self.is_recording_audio_message = False
-        self.root.opacity = 0
-        self.contacts = set() # Users who have accepted contact requests
-        self.search_user_input = None
-        self.settings_popup = None
-        
-        self.chat_history = {'global': []}
-        self.initialized = False
-        self.active_chat = 'global' # Can be 'global' or a group_id
-        
+        self.audio_manager = AudioManager(self.config_manager, self.callback_queue)
+        self.webrtc_manager = WebRTCManager(None, self.audio_manager, self.callback_queue) # P2P manager set later
+        self.hotkey_manager = HotkeyManager(self.callback_queue)
+        self.emoji_manager = EmojiManager(self)
 
-        Clock.schedule_interval(self.process_callbacks, 0.1)
-        Window.bind(on_request_close=self.on_request_close, on_dropfile=self.on_file_drop)
-        
-        # Set window title before showing any popups
-        Window.title = self.tr.get('window_title')
-        self.show_mode_selection_popup()
-
-    def process_callbacks(self, dt):
-        while not self.callback_queue.empty():
-            try:
-                event = self.callback_queue.get_nowait()
-                event_type = event[0]
-                
-                if event_type == 'bt_message_received':
-                    _, message = event
-                    self.add_message_to_box(message, 'global') # Assuming BT chat is global for now
-                elif event_type == 'bt_connected':
-                    _, address = event
-                    self.add_message_to_box(self.tr.get('bt_connected_to', address=address), 'global')
-                elif event_type == 'bt_connection_failed':
-                    _, address = event
-                    self.add_message_to_box(self.tr.get('bt_connection_failed', address=address), 'global')
-                elif event_type == 'bt_disconnected':
-                    self.add_message_to_box(self.tr.get('bt_disconnected'), 'global')
-                elif event_type == 'bt_adapter_error':
-                    _, error_msg = event
-                    self.show_popup("Bluetooth Error", error_msg)
-                elif event_type == 'webrtc_offer_created':
-                    self.p2p_manager.send_webrtc_signal(event[1]['peer'], 'offer', event[1]['offer'])
-                elif event_type == 'webrtc_answer_created':
-                    self.p2p_manager.send_webrtc_signal(event[1]['peer'], 'answer', event[1]['answer'])
-                elif event_type == 'mic_level':
-                    if self.settings_popup and self.settings_popup.is_testing:
-                        self.settings_popup.mic_level_bar.value = event[1]
-
-            except queue.Empty:
-                break
-
-    def show_mode_selection_popup(self):
-        popup = ModeSelectionPopup(translator=self.tr)
-        popup.bind(on_dismiss=self.on_mode_selected)
-        popup.open()
-
-    def on_mode_selected(self, popup):
-        self.mode = getattr(popup, 'mode', None)
-        if not self.mode:
-            self.stop()
-            return
-        
-        if self.mode == 'server':
-            self.show_server_login_popup()
-        else:
-            self.show_username_popup()
-
-    def show_server_login_popup(self):
-        config = self.config_manager.load_config()
-        popup = ServerLoginPopup(translator=self.tr, config=config)
-        popup.bind(on_dismiss=self.on_server_login_entered)
-        popup.open()
-
-    def on_server_login_entered(self, popup):
-        self.server_ip = getattr(popup, 'server_ip', None)
-        self.server_port = getattr(popup, 'server_port', None)
-        self.server_password = getattr(popup, 'password', None)
-
-        if not self.server_ip or not self.server_port:
-            self.stop()
-            return
-        
-        # Save the new server config
-        config = self.config_manager.load_config()
-        if 'server' not in config:
-            config['server'] = {}
-        config['server']['host'] = self.server_ip
-        config['server']['port'] = self.server_port
-        self.config_manager.save_config(config)
-
-        self.show_username_popup()
-
-    def show_username_popup(self):
-        config = self.config_manager.load_config()
-        current_username = config.get('username', '')
-        popup = UsernamePopup(translator=self.tr, current_username=current_username)
-        popup.bind(on_dismiss=self.on_username_entered)
-        popup.open()
-
-    def on_username_entered(self, popup):
-        self.username = getattr(popup, 'username', None)
-        if not self.username:
-            self.stop()
-            return
-        config = self.config_manager.load_config()
-        config['username'] = self.username
-        self.config_manager.save_config(config)
-        self.initialize_app()
-
-    def return_to_main_menu(self, instance=None):
-        """Shuts down the current session and returns to the mode selection screen."""
-        # Dismiss settings if it's open
-        if self.settings_popup:
-            # Unbind dismiss to prevent save logic from running
-            self.settings_popup.unbind(on_dismiss=self.on_settings_dismiss)
-            self.settings_popup.dismiss()
-
-        # 1. Shut down all managers and network activity
-        self.on_stop() # Use the existing on_stop logic
-
-        # 2. Reset the UI to a clean state
-        chat_ids = self.root.ids.chat_layout.ids
-        chat_ids.chat_box.clear_widgets()
-        chat_ids.users_list.clear_widgets()
-        
-        # Remove dynamically added widgets like search or bluetooth scan
-        if self.search_user_input and self.search_user_input.parent:
-            chat_ids.users_panel_controls.remove_widget(self.search_user_input.parent)
-        if hasattr(self, 'scan_bt_button') and self.scan_bt_button.parent:
-             chat_ids.users_panel_controls.remove_widget(self.scan_bt_button)
-
-
-        # 3. Reset internal state variables
+        # Application state
         self.p2p_manager = None
         self.server_manager = None
         self.bluetooth_manager = None
-        self.username = None
-        self.mode = None
+        self.username = "Anonymous" # Default username
+        self.mode = "p2p_internet" # Default mode
         self.server_groups = {}
         self.active_group_call = None
-        self.pending_group_call_punches = set()
         self.call_popup = None
         self.group_call_popup = None
-        self.current_peer_addr = None
-        self.pending_call_target = None
-        self.negotiated_rate = None
         self.is_muted = False
-        # Don't reset plugin manager, as it's loaded once.
-        # self.plugin_manager = None
+        self.plugin_manager = None
         self.is_recording_audio_message = False
         self.contacts = set()
-        self.search_user_input = None
-        self.hotkey_manager = HotkeyManager() # Re-create the manager for the new session
-        
         self.chat_history = {'global': []}
-        self.initialized = False # Allow re-initialization
+        self.initialized = False
         self.active_chat = 'global'
-        
-        # 4. Show the mode selection popup to start over
-        self.show_mode_selection_popup()
+        self.reply_to_message_data = None
+        self.edit_message_data = None
 
-    def initialize_app(self):
-        if self.initialized:
-            return
-        self.initialized = True
-        chat_ids = self.root.ids.chat_layout.ids
-        
-        chat_ids.send_button.bind(on_press=self.send_message)
-        chat_ids.theme_button.bind(on_press=self.toggle_theme)
-        chat_ids.settings_button.bind(on_press=self.show_settings_popup)
-        chat_ids.emoji_button.bind(on_press=self.toggle_emoji_panel)
-        chat_ids.record_button.bind(on_press=self.toggle_audio_message_record)
-        chat_ids.msg_entry.bind(on_text_validate=self.send_message)
-        
-        # Programmatically add Create Group button
-        group_actions_layout = chat_ids.group_actions_layout
-        
-        self.create_group_button = MDIconButton(icon='plus', pos_hint={'center_y': 0.5})
-        self.create_group_button.bind(on_press=self.show_create_group_popup)
-        group_actions_layout.add_widget(self.create_group_button)
+        # UI State
+        self.left_menu_open = False
 
-        # Context-sensitive buttons
-        self.primary_context_button = MDRaisedButton(size_hint_x=1)
-        self.secondary_context_button = MDRaisedButton(size_hint_x=None, width=dp(80))
-        
-        group_actions_layout.add_widget(self.primary_context_button)
-        group_actions_layout.add_widget(self.secondary_context_button)
+        # Setup page properties
+        self.page.title = "JustMessenger"
+        self.page.theme_mode = ft.ThemeMode.DARK
+        self.page.window_width = 1000
+        self.page.window_height = 600
 
-        # Store handlers to unbind them later
-        self._primary_context_handler = None
-        self._secondary_context_handler = None
-        
-        # Hide them initially
-        self.primary_context_button.opacity = 0
-        self.primary_context_button.disabled = True
-        self.secondary_context_button.opacity = 0
-        self.secondary_context_button.disabled = True
+        # Lighter dark theme colors from spec and user feedback
+        self.primary_gray = "#2d2d2d"
+        self.secondary_gray = "#424242"
+        self.background_color = "#1a1a1a"
+        self.surface_color = "#2d2d2d"
+        self.surface_variant_color = "#333333" # Borders and dividers
+        self.primary_purple = "#7C4DFF"  # Main accent for buttons, icons
+        self.secondary_purple = "#651FFF" # Darker purple
+        self.tertiary_purple = "#E1BEE7" # Lighter purple for highlights
+        self.error_color = "#FF5252"
+        self.success_color = "#4CAF50"
 
-        # --- P2P User Search (Internet Mode Only) ---
-        if self.mode == 'p2p_internet':
-            search_layout = MDBoxLayout(size_hint_y=None, height=80, spacing=10, padding=(5, 10))
-            self.search_user_input = MDTextField(
-                hint_text=self.tr.get('search_user_hint', 'Find user...'),
-                multiline=False,
-                mode="fill"
+        # Set page background color
+        self.page.bgcolor = self.background_color
+
+        # Register fonts
+        self.page.fonts = {
+            "Roboto": "fonts/Roboto-Regular.ttf",
+            "Roboto Bold": "fonts/Roboto-Bold.ttf",
+            "NotoSans": "fonts/NotoSans-Regular.ttf",
+            "Emoji": "fonts/NotoColorEmoji.ttf"
+        }
+
+        # Set a global theme for the app
+        self.page.theme = ft.Theme(
+            color_scheme=ft.ColorScheme(
+                primary=self.primary_purple,
+                primary_container=self.secondary_purple,
+                background=self.background_color,
+                surface=self.surface_color,
+                surface_variant=self.surface_variant_color,
+                on_primary=ft.colors.WHITE,
+                on_background=ft.colors.WHITE,
+                on_surface=ft.colors.WHITE,
+                error=self.error_color,
+            ),
+            font_family="Roboto" # Set default font
+        )
+
+        # Create navigation drawer (side menu) and assign it to the page
+        self.page.drawer = self.create_left_menu_panel()
+
+
+    def build(self):
+        # Create UI components
+        self.create_main_layout()
+        # The initialization process is now started from main()
+        return self.main_layout
+
+    def update(self):
+        # In newer Flet versions, update the page directly
+        self.page.update()
+
+    def create_main_layout(self):
+        # Left Panel (Chat List)
+        self.chat_list_panel = self.create_chat_list_panel()
+
+        # Main Chat Area
+        self.chat_view_panel = self.create_chat_view_panel()
+
+        # Right Panel (Profile)
+        self.profile_panel = self.create_profile_panel()
+
+        # Context menu is now a standalone container, will be added to page.overlay
+        self.message_context_menu = ft.Container(
+            visible=False, # Visibility controlled by adding/removing from overlay
+            bgcolor=self.surface_color,
+            border_radius=8,
+            border=ft.border.all(1, self.surface_variant_color),
+            padding=ft.padding.symmetric(vertical=5),
+            shadow=ft.BoxShadow(
+                spread_radius=1,
+                blur_radius=10,
+                color=ft.colors.with_opacity(0.2, ft.colors.BLACK),
+                offset=ft.Offset(2, 2),
+            ),
+            animate=ft.Animation(100, "ease"),
+            width=200,
+        )
+
+        # The main layout is now a simple Row, not a complex Stack.
+        # This is the core of the architectural fix.
+        self.main_layout = ft.Row(
+            controls=[
+                # Left Panel (Chat List)
+                ft.Container(
+                    content=self.chat_list_panel,
+                    width=300,
+                    bgcolor=self.surface_color,
+                    border=ft.border.only(right=ft.border.BorderSide(1, self.surface_variant_color))
+                ),
+                # Main Chat Area
+                ft.Container(
+                    content=self.chat_view_panel,
+                    expand=True,
+                    bgcolor=self.background_color
+                ),
+                # Profile Panel (initially hidden)
+                ft.Container(
+                    content=self.profile_panel,
+                    width=0,  # Hidden initially
+                    bgcolor=self.surface_color,
+                    border=ft.border.only(left=ft.border.BorderSide(1, self.surface_variant_color)),
+                    animate=ft.Animation(300, "ease")
+                )
+            ],
+            expand=True
+        )
+
+    def create_chat_list_panel(self):
+        # Search field
+        self.search_field = ft.TextField(
+            hint_text=self.tr.translate("search_chats_hint"),
+            border_radius=20,
+            filled=True,
+            bgcolor=self.surface_variant_color,
+            height=40,
+            text_size=14,
+            content_padding=ft.padding.all(10)
+        )
+
+        # Chat list container
+        self.chats_container = ft.ListView(expand=True, spacing=5, padding=ft.padding.all(10))
+
+        # New chat and menu buttons
+        toolbar = ft.Container(
+            content=ft.Row([
+                ft.IconButton(
+                    icon="menu",
+                    icon_color=self.primary_purple,
+                    on_click=self.toggle_left_menu
+                ),
+                ft.Text("JustMessenger", size=18, font_family="Roboto Bold"),
+                ft.IconButton(
+                    icon=ft.icons.EDIT,
+                    icon_color=self.primary_purple,
+                    on_click=self.create_new_chat
+                )
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            height=50,
+            border=ft.border.only(bottom=ft.border.BorderSide(1, self.surface_variant_color))
+        )
+
+        return ft.Column([
+            toolbar,
+            ft.Container(
+                content=self.search_field,
+                padding=ft.padding.all(10)
+            ),
+            self.chats_container
+        ])
+
+    def create_chat_view_panel(self):
+        # Chat header components
+        self.chat_avatar = ft.CircleAvatar(
+            content=ft.Text("#", color=ft.colors.WHITE),
+            bgcolor=self.primary_purple,
+            radius=20
+        )
+        self.chat_title = ft.Text(
+            self.tr.translate("global_chat_title"),
+            size=16,
+            weight=ft.FontWeight.BOLD,
+            color=ft.colors.WHITE
+        )
+        self.chat_status = ft.Text(
+            self.tr.translate("global_chat_status"),
+            size=12,
+            color=ft.colors.GREY
+        )
+
+        # Chat header container
+        self.chat_header = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        content=ft.Row([
+                            self.chat_avatar,
+                            ft.Column([
+                                self.chat_title,
+                                self.chat_status
+                            ])
+                        ]),
+                        on_click=self.open_profile_panel,
+                        expand=True
+                    ),
+                    ft.Row([
+                        ft.IconButton(
+                            icon=ft.icons.SEARCH,
+                            icon_color=self.primary_purple,
+                            tooltip=self.tr.translate("search_in_chat_tooltip"),
+                            on_click=self.search_in_chat
+                        ),
+                        ft.IconButton(
+                            icon=ft.icons.PHONE,
+                            icon_color=self.primary_purple,
+                            on_click=lambda e: self.initiate_call(self.active_chat),
+                            tooltip=self.tr.translate("voice_call_tooltip")
+                        ),
+                        ft.PopupMenuButton(
+                           icon=ft.icons.MORE_VERT,
+                           items=[
+                               ft.PopupMenuItem(text=self.tr.translate("profile_title"), on_click=self.open_profile_panel),
+                               ft.PopupMenuItem(),  # divider
+                               ft.PopupMenuItem(text=self.tr.translate("clear_history_button"), on_click=self.clear_chat_history),
+                               ft.PopupMenuItem(text=self.tr.translate("delete_chat_button"), on_click=self.delete_current_chat),
+                           ]
+                        )
+                    ])
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+            ),
+            padding=ft.padding.all(15),
+            height=70,
+            border=ft.border.only(bottom=ft.border.BorderSide(1, self.surface_variant_color))
+        )
+
+        # Messages container
+        self.messages_container = ft.ListView(expand=True, auto_scroll=True, spacing=10)
+
+        # Input area
+        self.input_area = self.create_input_area()
+
+        self.emoji_panel = self.create_emoji_panel()
+
+        chat_area = ft.Column([
+            self.chat_header,
+            ft.Container(
+                content=self.messages_container,
+                expand=True,
+                padding=ft.padding.all(10)
+            ),
+            self.input_area # Now it's a Column, so it's a direct child
+        ])
+        
+        background_layer = ft.Container(
+            bgcolor="#0f0f0f",  # Slightly darker than main background to simulate a background image layer
+            expand=True
+        )
+
+        return ft.Stack([
+            background_layer,
+            chat_area,
+            ft.Container(
+                content=self.emoji_panel,
+                right=10,
+                bottom=70
             )
-            search_button = MDRaisedButton(
-                text=self.tr.get('search_button', 'Find'),
-                size_hint_x=0.4
+        ])
+
+    def create_emoji_panel(self):
+        self.emoji_search = ft.TextField(
+            hint_text=self.tr.translate("search_emoji_hint"),
+            prefix_icon=ft.icons.SEARCH,
+            on_change=self.search_emoji,
+            height=40,
+            border_radius=20,
+            filled=True,
+            bgcolor=self.background_color
+        )
+
+        self.emoji_grid = ft.GridView(
+            runs_count=8,
+            spacing=5,
+            run_spacing=5,
+            expand=True
+        )
+
+        # Placeholder categories
+        categories = {
+            "Smileys & Emotion": ft.icons.SENTIMENT_SATISFIED,
+            "People & Body": ft.icons.ACCESSIBILITY,
+            "Animals & Nature": ft.icons.PETS,
+            "Food & Drink": ft.icons.EMOJI_FOOD_BEVERAGE,
+            "Travel & Places": ft.icons.AIRPLANEMODE_ACTIVE,
+            "Activities": ft.icons.SPORTS_ESPORTS,
+            "Objects": ft.icons.LIGHTBULB,
+            "Symbols": ft.icons.INFO,
+            "Flags": ft.icons.FLAG
+        }
+        
+        category_tabs = [ft.Tab(icon=icon, text=name) for name, icon in categories.items()]
+        self.emoji_category_tabs = ft.Tabs(
+            tabs=category_tabs,
+            on_change=self.load_emojis_for_category,
+            selected_index=0
+        )
+        
+        self.load_emojis_for_category(None) # Load initial category
+
+        return ft.Container(
+            content=ft.Column([
+                ft.Container(
+                    content=self.emoji_search,
+                    padding=ft.padding.all(10)
+                ),
+                self.emoji_category_tabs,
+                ft.Container(
+                    content=self.emoji_grid,
+                    expand=True,
+                    padding=ft.padding.all(10)
+                )
+            ]),
+            width=350,
+            height=400,
+            bgcolor=self.surface_color,
+            border_radius=10,
+            border=ft.border.all(1, self.surface_variant_color),
+            visible=False
+        )
+
+    def create_input_area(self):
+        self.edit_info_container = ft.Container(
+            visible=False,
+            bgcolor=self.surface_variant_color,
+            border_radius=ft.border_radius.only(top_left=10, top_right=10),
+            padding=ft.padding.symmetric(horizontal=15, vertical=8),
+            content=ft.Row(
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                controls=[
+                    ft.Column([
+                        ft.Text(self.tr.translate("edit_message_label"), color=self.primary_purple, weight=ft.FontWeight.BOLD, size=12),
+                        ft.Text("", size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, width=self.page.width * 0.5) # Placeholder
+                    ]),
+                    ft.IconButton(icon=ft.icons.CLOSE, icon_size=16, on_click=self.cancel_edit)
+                ]
             )
-            search_button.bind(on_press=self.find_p2p_user)
-            search_layout.add_widget(self.search_user_input)
-            search_layout.add_widget(search_button)
-            # Add to the main vertical controls layout, not the group actions one
-            chat_ids.users_panel_controls.add_widget(search_layout, index=0) # Add at the top
+        )
+
+        self.reply_info_container = ft.Container(
+            visible=False,
+            bgcolor=self.surface_variant_color,
+            border_radius=ft.border_radius.only(top_left=10, top_right=10),
+            padding=ft.padding.symmetric(horizontal=15, vertical=8),
+            content=ft.Row(
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                controls=[
+                    ft.Column([
+                        ft.Text(self.tr.translate("reply_to_label"), color=self.primary_purple, weight=ft.FontWeight.BOLD, size=12),
+                        ft.Text("", size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, width=self.page.width * 0.5) # Placeholder for replied text
+                    ]),
+                    ft.IconButton(icon=ft.icons.CLOSE, icon_size=16, on_click=self.cancel_reply)
+                ]
+            )
+        )
+
+        self.message_input = ft.TextField(
+            hint_text=self.tr.translate("message_hint"),
+            border_radius=0, # Will be controlled by the parent container
+            filled=True,
+            bgcolor=self.surface_color,
+            expand=True,
+            text_size=14,
+            content_padding=ft.padding.symmetric(horizontal=20, vertical=12),
+            on_submit=self.send_message_handler,
+            on_change=self.toggle_send_button_visibility, # Add this handler
+            shift_enter=True,
+            multiline=True,
+            min_lines=1,
+            max_lines=5
+        )
+
+        # Send and Mic buttons that switch
+        self.send_button = ft.IconButton(
+            icon=ft.icons.SEND,
+            icon_color=self.primary_purple,
+            on_click=self.send_message_handler,
+            tooltip=self.tr.translate("send_button_tooltip")
+        )
+        self.mic_button = ft.IconButton(
+            icon=ft.icons.MIC,
+            icon_color=self.primary_purple,
+            on_click=self.toggle_voice_recording,
+            tooltip=self.tr.translate("record_audio_tooltip")
+        )
+
+        self.action_button_switcher = ft.AnimatedSwitcher(
+            content=self.mic_button, # Start with mic button
+            transition=ft.AnimatedSwitcherTransition.SCALE,
+            duration=200,
+            reverse_duration=200
+        )
+
+        attachment_button = ft.PopupMenuButton(
+            icon=ft.icons.ATTACH_FILE,
+            tooltip=self.tr.translate("attach_file_tooltip"),
+            items=[
+                ft.PopupMenuItem(text=self.tr.translate("attach_photo"), icon=ft.icons.PHOTO, on_click=self.attach_photo),
+                ft.PopupMenuItem(text=self.tr.translate("attach_file"), icon=ft.icons.INSERT_DRIVE_FILE, on_click=self.attach_file),
+                ft.PopupMenuItem(text=self.tr.translate("attach_contact"), icon=ft.icons.CONTACTS, on_click=self.attach_contact),
+                ft.PopupMenuItem(text=self.tr.translate("attach_location"), icon=ft.icons.LOCATION_ON, on_click=self.attach_location),
+            ]
+        )
+        # Manually color the icon since PopupMenuButton lacks a direct icon_color property
+        # This is a conceptual approach; Flet's direct styling might differ.
+        # For now, we rely on the default icon color. A more complex solution would be a custom control.
+
+        input_row = ft.Row([
+            attachment_button,
+            self.message_input,
+            ft.IconButton(
+                icon=ft.icons.EMOJI_EMOTIONS,
+                icon_color=self.primary_purple,
+                on_click=self.toggle_emoji_panel,
+                tooltip=self.tr.translate("emoji_tooltip")
+            ),
+            self.action_button_switcher
+        ], spacing=5, vertical_alignment=ft.CrossAxisAlignment.END)
+
+        return ft.Container(
+            content=ft.Column(
+                [
+                    self.edit_info_container,
+                    self.reply_info_container,
+                    input_row
+                ],
+                spacing=0
+            ),
+            border=ft.border.only(top=ft.border.BorderSide(1, self.surface_variant_color)),
+            padding=ft.padding.all(10)
+        )
+
+    async def update_chat_list(self):
+        chat_data = {
+            **(self.p2p_manager.peers if self.p2p_manager else {}),
+            **(self.p2p_manager.groups if self.p2p_manager else {})
+        }
+        self.chats_container.controls.clear()
+
+        # Helper to create chat items
+        def create_chat_item(chat_id, name, avatar_content, last_message, last_time, unread_count):
+            is_selected = self.active_chat == chat_id
+            return ft.Container(
+                content=ft.ListTile(
+                    leading=avatar_content,
+                    title=ft.Text(name, weight=ft.FontWeight.BOLD),
+                    subtitle=ft.Text(last_message, size=12, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
+                    trailing=ft.Column([
+                        ft.Text(last_time, size=10, color=ft.colors.GREY_500),
+                        ft.Container(
+                            content=ft.Text(str(unread_count), size=10, color=ft.colors.WHITE),
+                            bgcolor=self.primary_purple,
+                            border_radius=10,
+                            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                            visible=unread_count > 0
+                        )
+                    ], alignment=ft.MainAxisAlignment.SPACE_AROUND, horizontal_alignment=ft.CrossAxisAlignment.END, height=40),
+                    dense=True
+                ),
+                bgcolor=self.secondary_gray if is_selected else ft.colors.TRANSPARENT,
+                border_radius=8,
+                on_click=lambda e, c_id=chat_id: self.switch_chat(c_id),
+                padding=ft.padding.symmetric(vertical=5, horizontal=5)
+            )
+
+        # Add Global Chat
+        global_chat_avatar = ft.CircleAvatar(content=ft.Text("#"), bgcolor=self.primary_purple)
+        global_chat_item = create_chat_item('global', self.tr.translate("global_chat_title"), global_chat_avatar, self.tr.translate("global_chat_status"), "", 0)
+        self.chats_container.controls.append(global_chat_item)
+
+        # Sort and add other chats
+        sorted_chats = sorted(chat_data.values(), key=lambda x: x.get('last_message_time', '1970-01-01'), reverse=True)
+        for chat in sorted_chats:
+            chat_id = chat['id']
+            name = chat['name']
+            avatar = ft.CircleAvatar(content=ft.Text(name[0].upper()))
+            
+            # Get last message info from history
+            history = self.chat_history.get(chat_id, [])
+            last_message_text = history[-1]['text'] if history else self.tr.translate("no_messages_yet")
+            last_message_time_iso = history[-1]['timestamp'] if history else None
+            last_message_time = datetime.fromisoformat(last_message_time_iso).strftime('%H:%M') if last_message_time_iso else ""
+            
+            chat_item = create_chat_item(chat_id, name, avatar, last_message_text, last_message_time, 0) # Unread count is 0 for now
+            self.chats_container.controls.append(chat_item)
+
+        if self.page:
+            self.update()
+
+    def update_chat_header(self, chat_id):
+        if chat_id == 'global':
+            chat_name = self.tr.translate("global_chat_title")
+            status = self.tr.translate("global_chat_status")
+            avatar_char = '#'
+        else:
+            if not self.p2p_manager: return
+            chat_info = self.p2p_manager.peers.get(chat_id) or self.p2p_manager.groups.get(chat_id)
+            if not chat_info:
+                print(f"Warning: Could not find chat info for {chat_id}")
+                return
+            chat_name = chat_info['name']
+            status = self.tr.translate("status_online") # Placeholder
+            avatar_char = chat_name[0].upper()
+        
+        self.chat_avatar.content.value = avatar_char
+        self.chat_title.value = chat_name
+        self.chat_status.value = status
+
+    def switch_chat(self, chat_id):
+        self.active_chat = chat_id
+        self.messages_container.controls.clear()
+        
+        # Redraw chat list to highlight the new active chat
+        self.page.run_task(self.update_chat_list)
+        
+        history = self.chat_history.get(chat_id, [])
+        for msg_data in history:
+            self.page.run_task(self.add_message_to_box, msg_data, chat_id)
+        
+        self.update_chat_header(chat_id)
+        # update_chat_list will call update, so this one is for the message box side
+        self.update()
+        print(f"Switched to chat: {chat_id}")
+
+    def create_profile_panel(self):
+        # Определения виджетов, которые будут обновляться
+        self.profile_avatar = ft.CircleAvatar(radius=40)
+        self.profile_name = ft.Text(self.tr.translate("unknown_user"), size=20, weight=ft.FontWeight.BOLD)
+        self.profile_username = ft.Text(self.tr.translate("unknown_username"), size=14, color=ft.colors.GREY)
+        self.info_username_subtitle = ft.Text()
+        self.info_status_subtitle = ft.Text(self.tr.translate("status_online")) # Placeholder
+
+        # --- Содержимое вкладки "Info" ---
+        info_tab_content = ft.Column(
+            [
+                ft.ListTile(
+                    leading=ft.Icon(ft.icons.PERSON, color=self.primary_purple),
+                    title=ft.Text(self.tr.translate("username_label")),
+                    subtitle=self.info_username_subtitle,
+                ),
+                ft.ListTile(
+                    leading=ft.Icon(ft.icons.INFO_OUTLINE, color=self.primary_purple),
+                    title=ft.Text(self.tr.translate("status_label")),
+                    subtitle=self.info_status_subtitle,
+                ),
+                ft.Divider(height=1, color=self.surface_variant_color),
+                ft.ListTile(
+                    leading=ft.Icon(ft.icons.NOTIFICATIONS, color=self.primary_purple),
+                    title=ft.Text(self.tr.translate("notifications_label")),
+                    trailing=ft.Switch(value=True),
+                    on_click=self.toggle_notifications,
+                ),
+            ],
+            spacing=5
+        )
+
+        # --- Содержимое вкладки "Media" ---
+        self.profile_media_grid = ft.GridView(
+            expand=True,
+            runs_count=3,
+            max_extent=100,
+            child_aspect_ratio=1.0,
+            spacing=5,
+            run_spacing=5,
+            padding=ft.padding.all(10),
+        )
+        media_tab_content = self.profile_media_grid
+
+        # --- Содержимое вкладки "Files" ---
+        self.profile_files_list = ft.ListView(
+            expand=True,
+            spacing=5,
+            padding=ft.padding.all(10),
+        )
+        files_tab_content = self.profile_files_list
+
+        # Создание вкладок
+        profile_tabs = ft.Tabs(
+            selected_index=0,
+            tabs=[
+                ft.Tab(text=self.tr.translate("profile_tab_info"), content=info_tab_content),
+                ft.Tab(text=self.tr.translate("profile_tab_media"), content=media_tab_content),
+                ft.Tab(text=self.tr.translate("profile_tab_files"), content=files_tab_content),
+            ],
+            expand=True,
+        )
+
+        # Основной макет панели профиля
+        return ft.Column(
+            controls=[
+                # Заголовок с именем и кнопкой закрытия
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Text(self.tr.translate("profile_title"), size=18, weight=ft.FontWeight.BOLD),
+                            ft.IconButton(icon=ft.icons.CLOSE, on_click=self.close_profile_panel, icon_size=20),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+                    ),
+                    padding=ft.padding.symmetric(horizontal=15, vertical=10),
+                    border=ft.border.only(bottom=ft.border.BorderSide(1, self.surface_variant_color))
+                ),
+                # Секция аватара и имени пользователя
+                ft.Container(
+                    content=ft.Column(
+                        [self.profile_avatar, self.profile_name, self.profile_username],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=5,
+                    ),
+                    padding=ft.padding.only(top=20, bottom=20),
+                ),
+                ft.Divider(height=1, color=self.surface_variant_color),
+                profile_tabs, # Вкладки занимают оставшееся место
+            ],
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+    async def initialize_app(self):
+        """
+        Finalizes app initialization after the main UI has been rendered.
+        This replaces the old dialog-based startup flow.
+        """
+        logging.info("Starting initialize_app...")
+        
+        # Start the callback processing loop in the background
+        self.page.run_task(self.process_callbacks_loop)
+
+        config = self.config_manager.load_config()
+        # Ensure default username is saved if not present
+        if 'username' not in config or not config['username']:
+            config['username'] = self.username
+        else:
+            self.username = config['username'] # Load existing username
+        self.config_manager.save_config(config)
 
         if self.mode.startswith('p2p') and self.mode != 'p2p_bluetooth':
-            self.init_p2p_mode()
+            await self.init_p2p_mode()
         elif self.mode == 'p2p_bluetooth':
-            self.init_bluetooth_mode()
+            await self.init_bluetooth_mode()
         elif self.mode == 'server':
-            self.init_server_mode()
+            await self.init_server_mode()
+
+        await self.apply_audio_settings(config)
+
+        # Apply theme from config
+        theme = config.get('theme_mode', 'dark')
+        self.page.theme_mode = ft.ThemeMode.DARK if theme == 'dark' else ft.ThemeMode.LIGHT
         
-        config = self.config_manager.load_config()
-        self.init_hotkeys()
-        # self.apply_theme() is removed
-        self.apply_audio_settings(config) # Apply saved audio settings
-        self.root.opacity = 1
-        
-        # Initialize and load plugins
+        # Update UI with username
+        self.update_username_in_ui()
+        self.page.update()
+
+        # Load plugins and complete setup
         self.plugin_manager = PluginManager(self)
         self.plugin_manager.discover_and_load_plugins()
-        self.emoji_manager = EmojiManager()
-        self.create_emoji_panel()
-        self.webrtc_manager.start()
         
-        chat_ids.msg_entry.focus = True
-        # The native window is now used, so borderless setup is not required.
-        # Clock.schedule_once(self.setup_borderless_window, 0)
+        # Update the chat list now that the managers are initialized
+        self.page.run_task(self.update_chat_list)
+        self.initialized = True
+        logging.info("initialize_app finished.")
+        # Add a helpful startup message
+        await self.add_message_to_box(self.tr.translate("welcome_message_guidance"), 'global')
 
-    def find_p2p_user(self, instance):
-        username = self.search_user_input.text.strip()
-        if not username:
+    def update_username_in_ui(self):
+        """Updates all UI elements that display the username."""
+        if self.username:
+            self.menu_username.value = self.username
+            self.menu_avatar.content = ft.Text(self.username[0].upper())
+        # Potentially update other places like the profile panel if needed
+        self.page.update()
+
+    async def process_callbacks_loop(self):
+        """Dedicated loop to process events from the queue."""
+        while True:
+            try:
+                if not self.callback_queue.empty():
+                    event = self.callback_queue.get_nowait()
+                    await self.process_callback(event)
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Error in callback processing: {e}")
+
+    async def process_callback(self, event):
+        event_type = event[0]
+
+        if event_type == 'bt_message_received':
+            _, message = event
+            await self.add_message_to_box(message, 'global')
+        elif event_type == 'bt_devices_discovered':
+            _, devices = event
+            await self.show_bt_devices_dialog(devices)
+        elif event_type == 'bt_connected':
+            _, address = event
+            await self.add_message_to_box(f"Bluetooth: Connected to {address}", 'global')
+            # Clear scan results and show chat view
+            self.chats_container.controls.clear()
+            self.chats_container.controls.append(ft.Text(self.tr.translate("bt_chat_active")))
+            self.update()
+        elif event_type == 'bt_connection_failed':
+            _, address = event
+            await self.add_message_to_box(f"Bluetooth: Connection to {address} failed", 'global')
+        elif event_type == 'bt_disconnected':
+            await self.add_message_to_box("Bluetooth: Disconnected", 'global')
+            # Show scan button again
+            await self.init_bluetooth_mode()
+        elif event_type == 'bt_adapter_error':
+            _, error_msg = event
+            await self.show_popup(self.tr.translate("bt_error_title"), error_msg)
+        elif event_type == 'webrtc_offer_created':
+            self.p2p_manager.send_webrtc_signal(event[1]['peer'], 'offer', event[1]['offer'])
+        elif event_type == 'webrtc_answer_created':
+            self.p2p_manager.send_webrtc_signal(event[1]['peer'], 'answer', event[1]['answer'])
+        elif event_type == 'mic_level':
+            if hasattr(self, 'settings_dialog') and self.settings_dialog.open:
+                # Update mic level in settings if open
+                pass
+
+    async def show_mode_selection(self):
+        # Mode selection dialog
+        def on_mode_selected(e, mode):
+            self.mode = mode
+            self.page.dialog.open = False
+            self.page.update()
+            self.page.run_task(self.handle_mode_selection)
+
+        modes = [
+            {"name": self.tr.translate("mode_p2p_internet"), "mode": "p2p_internet"},
+            {"name": self.tr.translate("mode_p2p_local"), "mode": "p2p_local"},
+            {"name": self.tr.translate("mode_p2p_bluetooth"), "mode": "p2p_bluetooth"},
+            {"name": self.tr.translate("mode_server"), "mode": "server"}
+        ]
+
+        mode_buttons = []
+        for mode_info in modes:
+            mode_buttons.append(
+                ft.ElevatedButton(
+                    text=mode_info["name"],
+                    width=250,
+                    height=50,
+                    style=ft.ButtonStyle(
+                        bgcolor=self.primary_purple,
+                        color=ft.colors.WHITE
+                    ),
+                    on_click=lambda e, m=mode_info["mode"]: on_mode_selected(e, m)
+                )
+            )
+
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("select_mode_title"), size=20),
+            content=ft.Column(mode_buttons, spacing=10),
+            actions_alignment=ft.MainAxisAlignment.CENTER
+        )
+        self.page.dialog.open = True
+        self.page.update()
+
+
+
+    async def add_message_to_box(self, message_data, chat_id=None):
+        if chat_id is None:
+            chat_id = 'global'
+
+        if isinstance(message_data, str):
+            message_data = {
+                'id': str(uuid.uuid4()),
+                'sender': 'System',
+                'text': message_data,
+                'timestamp': datetime.now().isoformat()
+            }
+
+        self.chat_history.setdefault(chat_id, []).append(message_data)
+
+        if self.active_chat != chat_id:
             return
-        if self.mode == 'p2p_internet' and self.p2p_manager:
-            self.add_message_to_box(f"System: Searching for '{username}' in the network...", 'global')
-            self.p2p_manager.find_peer(username)
-            self.search_user_input.text = ""
 
-    def init_p2p_mode(self):
+        sender = message_data.get('sender', 'System')
+        text = message_data.get('text', '')
+        is_self = sender == self.username
+
+        # Create message bubble
+        if sender == 'System':
+            message_bubble = ft.Container(
+                content=ft.Text(
+                    text,
+                    color=ft.colors.GREY_400,
+                    size=12,
+                    italic=True
+                ),
+                alignment=ft.alignment.center,
+                padding=ft.padding.all(10)
+            )
+        else:
+            # Telegram-style message bubble
+            timestamp = datetime.fromisoformat(message_data.get('timestamp', datetime.now().isoformat()))
+            time_text = timestamp.strftime('%H:%M')
+            if message_data.get('edited'):
+                time_text += " (edited)"
+
+            message_items = []
+
+            # Add reply block if it exists
+            if 'reply_to' in message_data and message_data['reply_to']:
+                reply_info = message_data['reply_to']
+                reply_sender = reply_info.get('sender', 'Unknown')
+                reply_text = reply_info.get('text', '')
+
+                reply_display = ft.Container(
+                    content=ft.Column([
+                        ft.Text(reply_sender, weight=ft.FontWeight.BOLD, color=self.primary_purple, size=12),
+                        ft.Text(reply_text, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS, size=12, color=ft.colors.WHITE70)
+                    ], spacing=2),
+                    padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                    border=ft.border.only(left=ft.border.BorderSide(2, self.primary_purple)),
+                    margin=ft.margin.only(bottom=5)
+                )
+                message_items.append(reply_display)
+
+            # Add main message text
+            message_items.append(ft.Text(text, color=ft.colors.WHITE, size=14))
+            
+            # Add timestamp
+            message_items.append(
+                ft.Text(
+                    time_text,
+                    color=ft.colors.WHITE70,
+                    size=10,
+                    text_align=ft.TextAlign.RIGHT,
+                    margin=ft.margin.only(top=5)
+                )
+            )
+
+            message_content = ft.Column(message_items, spacing=4, tight=True)
+
+            bubble = ft.Container(
+                content=message_content,
+                bgcolor=self.primary_purple if is_self else self.surface_color,
+                padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                border_radius=ft.border_radius.only(
+                    top_left=18,
+                    top_right=18,
+                    bottom_left=18 if is_self else 0,
+                    bottom_right=0 if is_self else 18
+                ),
+                max_width=self.page.width * 0.6  # Limit message width
+            )
+
+            # Use a Row to align the bubble to the left or right
+            # Wrap it in a GestureDetector for the context menu
+            message_with_context = ft.GestureDetector(
+                content=bubble,
+                on_secondary_tap=lambda e, msg=message_data: self.page.run_task(self.show_message_context_menu, e, msg),
+            )
+
+            # Use a Row to align the bubble to the left or right
+            message_bubble = ft.Row(
+                controls=[message_with_context],
+                alignment=ft.MainAxisAlignment.END if is_self else ft.MainAxisAlignment.START,
+                data=message_data['id'] # Store message ID here for deletion
+            )
+
+        # Add to messages container
+        self.messages_container.controls.append(message_bubble)
+        # With ListView and auto_scroll=True, this is handled automatically
+        self.page.update()
+
+    async def send_message_handler(self, e):
+        text = self.message_input.value.strip()
+        if not text:
+            return
+
+        # Handle message editing
+        if self.edit_message_data:
+            if self.p2p_manager:
+                # In a real implementation, a specific message type 'edit' would be sent
+                # self.p2p_manager.send_message_edit(self.active_chat, self.edit_message_data['id'], text)
+                
+                # For now, we simulate it locally
+                self.page.run_task(self.handle_local_message_edit, self.active_chat, self.edit_message_data['id'], text)
+
+            self.message_input.value = ""
+            self.cancel_edit(None)
+            return
+
+        message_data = {
+            'id': str(uuid.uuid4()),
+            'sender': self.username,
+            'text': text,
+            'timestamp': datetime.now().isoformat(),
+            'status': 'sent'
+        }
+        
+        if self.reply_to_message_data:
+            message_data['reply_to'] = {
+                'id': self.reply_to_message_data.get('id'),
+                'sender': self.reply_to_message_data.get('sender'),
+                'text': self.reply_to_message_data.get('text')
+            }
+
+        # Handle different communication modes
+        if self.mode.startswith('p2p') and self.p2p_manager:
+            is_group = self.active_chat in self.p2p_manager.groups
+
+            if self.active_chat == 'global':
+                if not self.contacts:
+                    await self.show_popup(self.tr.translate("cannot_send_title"), self.tr.translate("add_contact_to_send_message"))
+                    return
+                for contact_user in self.contacts:
+                    self.p2p_manager.send_private_message(contact_user, message_data)
+                await self.add_message_to_box(message_data, 'global')
+
+            elif is_group:
+                self.p2p_manager.send_group_message(self.active_chat, message_data)
+                await self.add_message_to_box(message_data, self.active_chat)
+
+            else:
+                self.p2p_manager.send_private_message(self.active_chat, message_data)
+                await self.add_message_to_box(message_data, self.active_chat)
+
+        elif self.mode == 'server' and self.server_manager:
+            if self.active_chat != 'global':
+                self.server_manager.send_group_message(self.active_chat, message_data)
+                await self.add_message_to_box(message_data, self.active_chat)
+            else:
+                await self.add_message_to_box(self.tr.translate("no_global_server_mode"), 'global')
+
+        elif self.mode == 'p2p_bluetooth' and self.bluetooth_manager:
+            full_message = f"{self.username}: {text}"
+            if self.bluetooth_manager.send_message(full_message):
+                await self.add_message_to_box(full_message, 'global')
+            else:
+                await self.add_message_to_box(self.tr.translate("bt_not_connected"), 'global')
+
+        # Clear input and reset reply state
+        self.message_input.value = ""
+        if self.reply_to_message_data:
+            self.cancel_reply(None) # Pass None as event
+        else:
+            self.update() # Use async update
+
+        # After sending, toggle button back to mic
+        self.page.run_task(self.toggle_send_button_visibility)
+
+    async def toggle_send_button_visibility(self, e=None):
+        if self.message_input.value.strip():
+            self.action_button_switcher.content = self.send_button
+        else:
+            self.action_button_switcher.content = self.mic_button
+        self.update()
+
+    async def show_popup(self, title, message):
+        def on_dismiss(e):
+            self.page.dialog.open = False
+            self.page.update()
+
+        self.page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(title, size=18),
+            content=ft.Text(message),
+            actions=[ft.TextButton(self.tr.translate("ok_button"), on_click=on_dismiss, style=ft.ButtonStyle(color=self.primary_purple))],
+            actions_alignment=ft.MainAxisAlignment.END,
+            bgcolor=self.surface_color,
+            shape=ft.RoundedRectangleBorder(radius=10)
+        )
+        self.page.dialog.open = True
+        self.page.update()
+
+    # Event handlers
+    def create_left_menu_panel(self):
+        # Placeholder for profile info
+        self.menu_avatar = ft.CircleAvatar(content=ft.Text("?"))
+        self.menu_username = ft.Text(self.tr.translate("username_label"), weight=ft.FontWeight.BOLD)
+
+        menu_items = ft.Column([
+            ft.Container(
+                content=ft.ListTile(
+                    leading=ft.Icon(ft.icons.GROUP_ADD),
+                    title=ft.Text(self.tr.translate("new_group_menu")),
+                ),
+                on_click=self.create_new_group,
+                border_radius=8,
+                ink=True
+            ),
+            ft.Container(
+                content=ft.ListTile(
+                    leading=ft.Icon(ft.icons.CONTACTS),
+                    title=ft.Text(self.tr.translate("contacts_menu")),
+                ),
+                on_click=self.show_contacts,
+                border_radius=8,
+                ink=True
+            ),
+            ft.Container(
+                content=ft.ListTile(
+                    leading=ft.Icon(ft.icons.SETTINGS),
+                    title=ft.Text(self.tr.translate("settings_menu")),
+                ),
+                on_click=self.open_settings,
+                border_radius=8,
+                ink=True
+            ),
+        ])
+
+        return ft.NavigationDrawer(
+            controls=[
+                ft.Column([
+                    ft.Container(
+                        content=ft.Column([
+                            self.menu_avatar,
+                            self.menu_username
+                        ]),
+                        padding=ft.padding.all(20),
+                        bgcolor=self.primary_purple
+                    ),
+                    menu_items
+                ])
+            ],
+            bgcolor=self.surface_color,
+        )
+
+    def close_overlays(self, e=None):
+        """Closes any active overlay like the context menu."""
+        self.page.overlay.clear()
+        if self.message_context_menu:
+            self.message_context_menu.visible = False
+        self.page.update()
+
+    async def show_message_context_menu(self, e, message_data):
+        is_self = message_data.get('sender') == self.username
+
+        # Helper to close the menu and then run the desired action
+        async def run_action(action_coro, *args):
+            self.close_overlays()
+            await action_coro(*args)
+
+        menu_items = [
+            ft.ListTile(
+                title=ft.Text(self.tr.translate("context_menu_reply")),
+                leading=ft.Icon(ft.icons.REPLY),
+                dense=True,
+                on_click=lambda _e: self.page.run_task(run_action, self.reply_to_message, message_data),
+            ),
+             ft.ListTile(
+                title=ft.Text(self.tr.translate("context_menu_copy")),
+                leading=ft.Icon(ft.icons.COPY),
+                dense=True,
+                on_click=lambda _e: self.page.run_task(run_action, self.copy_message_text, message_data['text']),
+            ),
+        ]
+        if is_self:
+            menu_items.append(
+                ft.ListTile(
+                    title=ft.Text(self.tr.translate("context_menu_edit")),
+                    leading=ft.Icon(ft.icons.EDIT),
+                    dense=True,
+                    on_click=lambda _e: self.page.run_task(run_action, self.edit_message, message_data),
+                )
+            )
+            menu_items.append(ft.ListTile(
+                title=ft.Text(self.tr.translate("context_menu_delete"), color=self.error_color),
+                leading=ft.Icon(ft.icons.DELETE, color=self.error_color),
+                dense=True,
+                on_click=lambda _e: self.page.run_task(run_action, self.delete_message, message_data),
+            ))
+
+        self.message_context_menu.content = ft.Column(menu_items, spacing=0, tight=True)
+
+        # Position the menu near the cursor
+        x = e.global_x
+        y = e.global_y
+        if x + self.message_context_menu.width > self.page.width - 20:
+             x = self.page.width - self.message_context_menu.width - 20
+        if y + 100 > self.page.height - 20: # Approximate height
+             y = self.page.height - 100 - 20
+
+        self.message_context_menu.left = x
+        self.message_context_menu.top = y
+        self.message_context_menu.visible = True
+        
+        # Add a dismissible overlay first, then the menu on top
+        self.page.overlay.clear()
+        self.page.overlay.append(
+            ft.GestureDetector(
+                on_tap=self.close_overlays,
+                on_secondary_tap=self.close_overlays
+            )
+        )
+        self.page.overlay.append(self.message_context_menu)
+        self.page.update()
+
+    async def copy_message_text(self, text):
+        self.page.set_clipboard(text)
+        await self.show_popup(self.tr.translate("copied_title"), self.tr.translate("copied_message"))
+
+    async def delete_message(self, message_data):
+        chat_id = self.active_chat
+        message_id = message_data['id']
+
+        # Remove from UI
+        control_to_remove = next((c for c in self.messages_container.controls if c.data == message_id), None)
+        if control_to_remove:
+            self.messages_container.controls.remove(control_to_remove)
+            self.update()
+
+        # Remove from history
+        if chat_id in self.chat_history:
+            self.chat_history[chat_id] = [msg for msg in self.chat_history[chat_id] if msg['id'] != message_id]
+        
+        # Notify other users (if applicable)
+        if self.p2p_manager:
+            # This requires a new message type in the P2P protocol, e.g., 'message_delete'
+            # self.p2p_manager.broadcast_message_delete(chat_id, message_id)
+            pass
+
+    async def reply_to_message(self, message_data):
+        self.reply_to_message_data = message_data
+        
+        reply_text_control = self.reply_info_container.content.controls[0].controls[1]
+        reply_text_control.value = message_data['text']
+        
+        self.reply_info_container.visible = True
+        self.update()
+
+    def cancel_reply(self, e):
+        self.reply_to_message_data = None
+        self.reply_info_container.visible = False
+        self.update()
+
+    async def edit_message(self, message_data):
+        self.edit_message_data = message_data
+        
+        edit_text_control = self.edit_info_container.content.controls[0].controls[1]
+        edit_text_control.value = message_data['text']
+        
+        self.message_input.value = message_data['text']
+        self.edit_info_container.visible = True
+        
+        self.message_input.focus()
+        self.update()
+
+    def cancel_edit(self, e):
+        self.edit_message_data = None
+        self.edit_info_container.visible = False
+        self.message_input.value = ""
+        self.update()
+
+    async def handle_local_message_edit(self, chat_id, message_id, new_text):
+        # Find the message control in the UI
+        message_control = next((c for c in self.messages_container.controls if c.data == message_id), None)
+        if message_control:
+            # The structure is Row -> GestureDetector -> Container -> Column -> (ReplyContainer, Text, TimestampText)
+            bubble_content_column = message_control.controls[0].content.content
+            
+            # Find the main text control
+            main_text_control = None
+            for control in bubble_content_column.controls:
+                if isinstance(control, ft.Text) and control.color == ft.colors.WHITE:
+                    main_text_control = control
+                    break
+            
+            if main_text_control:
+                main_text_control.value = new_text
+                # Add (edited) tag - find timestamp and append to it
+                timestamp_text_control = bubble_content_column.controls[-1]
+                if "(edited)" not in timestamp_text_control.value:
+                    timestamp_text_control.value += " (edited)"
+
+        # Update the message in chat history
+        if chat_id in self.chat_history:
+            for msg in self.chat_history[chat_id]:
+                if msg['id'] == message_id:
+                    msg['text'] = new_text
+                    msg['edited'] = True
+                    break
+        
+        self.update()
+
+    def toggle_left_menu(self, e):
+        self.page.drawer.open = not self.page.drawer.open
+        self.page.update()
+
+    def open_search(self, e):
+        self.page.run_task(self.show_search_dialog)
+
+    async def create_new_chat(self, e):
+        await self.show_contact_request_sent_dialog()
+
+    async def show_contact_request_sent_dialog(self):
+        def send_request(e):
+            username = username_field.value.strip()
+            password = password_field.value
+            if not username:
+                return
+
+            self.page.dialog.open = False
+            self.update()
+
+            if self.p2p_manager:
+                self.p2p_manager.send_contact_request(username, password)
+                self.page.run_task(self.show_popup, self.tr.translate("request_sent_title"), self.tr.translate("contact_request_sent_message").format(username=username))
+            else:
+                self.page.run_task(self.show_popup, self.tr.translate("error_title"), self.tr.translate("p2p_not_initialized_message"))
+
+        username_field = ft.TextField(label=self.tr.translate("username_label"), width=300)
+        password_field = ft.TextField(label=self.tr.translate("password_optional_label"), password=True, can_reveal_password=True, width=300)
+
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("add_contact_title")),
+            content=ft.Column([username_field, password_field]),
+            actions=[ft.TextButton(self.tr.translate("send_button"), on_click=send_request), ft.TextButton(self.tr.translate("cancel_button"), on_click=lambda e: self.close_dialog())],
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    async def show_search_dialog(self):
+        def on_search(e):
+            query = search_field.value.strip()
+            if query:
+                # Implement search functionality
+                self.page.dialog.open = False
+                self.update()
+
+        search_field = ft.TextField(
+            hint_text=self.tr.translate("global_search_hint"),
+            width=400,
+            on_submit=on_search
+        )
+
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("global_search_title"), size=20),
+            content=search_field,
+            actions=[ft.TextButton(self.tr.translate("search_button"), on_click=on_search)],
+            actions_alignment=ft.MainAxisAlignment.END
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    async def show_new_chat_dialog(self):
+        def on_create(e):
+            target = name_field.value.strip()
+            chat_type = type_dropdown.value
+            if target:
+                if self.p2p_manager and chat_type == "Group Chat":
+                    self.p2p_manager.create_group(target)
+                else:
+                    self.page.run_task(self.show_popup, self.tr.translate("not_implemented_title"), self.tr.translate("private_chat_not_implemented_message"))
+                self.close_dialog()
+
+        name_field = ft.TextField(
+            hint_text=self.tr.translate("enter_username_or_group_hint"),
+            width=400
+        )
+
+        type_dropdown = ft.Dropdown(
+            options=[
+                ft.dropdown.Option(self.tr.translate("private_chat_option")),
+                ft.dropdown.Option(self.tr.translate("group_chat_option"))
+            ],
+            value=self.tr.translate("private_chat_option"),
+            width=200
+        )
+
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("new_chat_title"), size=20),
+            content=ft.Column([
+                type_dropdown,
+                name_field
+            ]),
+            actions=[ft.TextButton(self.tr.translate("create_button"), on_click=on_create)],
+            actions_alignment=ft.MainAxisAlignment.END
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    def open_profile_panel(self, e):
+        profile_container = self.main_layout.controls[2]
+        
+        is_opening = profile_container.width == 0
+        
+        if is_opening:
+            self.page.run_task(self.update_profile_panel, self.active_chat)
+            profile_container.width = 300
+        else:
+            profile_container.width = 0
+            
+        profile_container.animate = ft.Animation(300, "ease")
+        self.update()
+
+    async def update_profile_panel(self, chat_id):
+        is_group = False
+        if chat_id == 'global':
+            chat_name = self.tr.translate("global_chat_title")
+            username = "#public"
+            status = self.tr.translate("global_chat_status")
+            avatar_char = "#"
+        else:
+            if not self.p2p_manager: return
+            chat_info = self.p2p_manager.peers.get(chat_id) or self.p2p_manager.groups.get(chat_id)
+            if not chat_info: return
+            
+            is_group = 'members' in chat_info # Простой способ определить, группа ли это
+            chat_name = chat_info['name']
+            username = f"@{chat_name}"
+            
+            if is_group:
+                member_count = len(chat_info.get('members', []))
+                status = f"{member_count} members"
+            else:
+                 status = self.tr.translate("status_online")  # Placeholder для личных чатов
+            avatar_char = chat_name[0].upper()
+
+        # Обновление виджетов
+        self.profile_name.value = chat_name
+        self.profile_username.value = username
+        self.profile_avatar.content = ft.Text(avatar_char, size=30)
+        
+        # Обновление информации на вкладке "Info"
+        self.info_username_subtitle.value = username
+        self.info_status_subtitle.value = status
+        
+        # --- Обновление вкладок "Media" и "Files" ---
+        self.profile_media_grid.controls.clear()
+        self.profile_files_list.controls.clear()
+
+        history = self.chat_history.get(chat_id, [])
+        media_found = False
+        files_found = False
+        
+        # Простой regex для поиска URL изображений
+        image_url_pattern = regex.compile(r'https?://\S+\.(?:png|jpg|jpeg|gif|bmp)', regex.IGNORECASE)
+
+        for message in reversed(history): # Показываем новые первыми
+            text = message.get('text', '')
+            
+            # Поиск медиа
+            image_urls = image_url_pattern.findall(text)
+            if image_urls:
+                media_found = True
+                for url in image_urls:
+                    self.profile_media_grid.controls.append(
+                        ft.Image(
+                            src=url,
+                            fit=ft.ImageFit.COVER,
+                            border_radius=ft.border_radius.all(8),
+                            error_content=ft.Container(
+                                content=ft.Icon(ft.icons.BROKEN_IMAGE, color=ft.colors.GREY),
+                                alignment=ft.alignment.center,
+                                bgcolor=self.surface_variant_color,
+                                border_radius=ft.border_radius.all(8)
+                            )
+                        )
+                    )
+            
+            # Поиск файлов (логика-заполнитель)
+            if "file:" in text.lower():
+                files_found = True
+                file_name = text.split(' ')[-1] # Простое извлечение
+                sender = message.get('sender', 'Unknown')
+                timestamp = datetime.fromisoformat(message.get('timestamp')).strftime('%Y-%m-%d')
+
+                self.profile_files_list.controls.append(
+                    ft.ListTile(
+                        leading=ft.Icon(ft.icons.INSERT_DRIVE_FILE, color=self.primary_purple),
+                        title=ft.Text(file_name, size=14, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS),
+                        subtitle=ft.Text(f"by {sender} on {timestamp}", size=12),
+                        on_click=lambda e, f=file_name: self.page.run_task(self.show_popup, self.tr.translate("download_popup_title"), self.tr.translate("download_popup_message").format(file_name=f))
+                    )
+                )
+
+        # Добавляем плейсхолдеры, если ничего не найдено
+        if not media_found:
+            self.profile_media_grid.controls.append(
+                ft.Container(content=ft.Text(self.tr.translate("no_media_placeholder"), text_align=ft.TextAlign.CENTER), alignment=ft.alignment.center, expand=True)
+            )
+        if not files_found:
+            self.profile_files_list.controls.append(
+                 ft.Container(content=ft.Text(self.tr.translate("no_files_placeholder"), text_align=ft.TextAlign.CENTER), alignment=ft.alignment.center, expand=True)
+            )
+
+        self.update()
+
+    def close_profile_panel(self, e):
+        profile_container = self.main_layout.controls[2]
+        if profile_container.width > 0:
+            profile_container.width = 0
+            profile_container.animate = ft.Animation(300, "ease")
+            self.update()
+
+    def switch_profile_tab(self, e):
+        selected_index = e.control.selected_index
+        if selected_index == 0:
+            self.tab_content.content = self.profile_info_tab
+        elif selected_index == 1:
+            self.tab_content.content = self.profile_media_tab
+        elif selected_index == 2:
+            self.tab_content.content = self.profile_files_tab
+        self.update()
+
+    def toggle_notifications(self, e):
+        # Placeholder for notification toggle logic
+        print(f"Toggling notifications for {self.active_chat}")
+
+    def toggle_emoji_panel(self, e):
+        if not hasattr(self, 'emoji_panel'):
+            print("Emoji panel not initialized yet.")
+            return
+
+        is_opening = not self.emoji_panel.visible
+        
+        if is_opening:
+            # Load initial category if not loaded
+            if not self.emoji_grid.controls:
+                self.load_emojis_for_category(None)
+        
+        self.emoji_panel.visible = is_opening
+        self.emoji_panel.animate = ft.Animation(300, "ease")
+        self.emoji_panel.opacity = 1 if is_opening else 0
+        
+        self.update()
+
+    async def create_new_group(self, e):
+        if self.page.drawer.open:
+            self.toggle_left_menu(e)
+            await asyncio.sleep(0.3)  # Wait for drawer animation
+        
+        def on_create(e_create):
+            group_name = name_field.value.strip()
+            if group_name and self.p2p_manager:
+                self.p2p_manager.create_group(group_name)
+                self.close_dialog()
+                self.page.run_task(self.show_popup, self.tr.translate("group_created_title"), self.tr.translate("group_created_message").format(group_name=group_name))
+
+        name_field = ft.TextField(label=self.tr.translate("group_name_label"), width=300)
+        
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("create_new_group_title")),
+            content=name_field,
+            actions=[
+                ft.TextButton(self.tr.translate("cancel_button"), on_click=lambda e_cancel: self.close_dialog()),
+                ft.TextButton(self.tr.translate("create_button"), on_click=on_create, style=ft.ButtonStyle(color=self.primary_purple))
+            ],
+            bgcolor=self.surface_color,
+            shape=ft.RoundedRectangleBorder(radius=10)
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    async def show_contacts(self, e):
+        if self.page.drawer.open:
+            self.toggle_left_menu(e)
+            await asyncio.sleep(0.3)  # Wait for drawer animation
+
+        async def add_contact_click(e_add):
+            self.close_dialog()
+            await self.show_contact_request_sent_dialog()
+
+        contact_list = ft.ListView(spacing=10, padding=10)
+        if self.contacts:
+            for contact_name in sorted(list(self.contacts)):
+                contact_list.controls.append(
+                    ft.ListTile(
+                        leading=ft.CircleAvatar(content=ft.Text(contact_name[0].upper())),
+                        title=ft.Text(contact_name)
+                    )
+                )
+        else:
+            contact_list.controls.append(ft.Text(self.tr.translate("no_contacts_placeholder")))
+
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("contacts_title")),
+            content=ft.Container(
+                content=contact_list,
+                width=350,
+                height=400
+            ),
+            actions=[
+                ft.TextButton(self.tr.translate("add_contact_button"), on_click=add_contact_click, style=ft.ButtonStyle(color=self.primary_purple)),
+                ft.TextButton(self.tr.translate("close_button"), on_click=lambda e_close: self.close_dialog())
+            ],
+            actions_alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            bgcolor=self.surface_color,
+            shape=ft.RoundedRectangleBorder(radius=10)
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    def select_emoji(self, e, emoji_char):
+        self.message_input.value += emoji_char
+        self.update()
+
+    def search_emoji(self, e):
+        query = e.data.lower()
+        if not query:
+            self.load_emojis_for_category(None) # Reset to current category
+            return
+            
+        filtered_emojis = self.emoji_manager.search_emoji(query)
+        self.update_emoji_grid(filtered_emojis)
+        
+    def load_emojis_for_category(self, e):
+        category_index = self.emoji_category_tabs.selected_index if e else 0
+        category_name = self.emoji_category_tabs.tabs[category_index].text
+        
+        emojis = self.emoji_manager.get_emojis_by_category(category_name)
+        self.update_emoji_grid(emojis)
+
+    def update_emoji_grid(self, emojis):
+        self.emoji_grid.controls.clear()
+        for emoji_char in emojis[:100]: # Limit for performance
+            self.emoji_grid.controls.append(
+                ft.Container(
+                    content=ft.Text(emoji_char, size=24),
+                    on_click=partial(self.select_emoji, emoji_char=emoji_char),
+                    border_radius=8,
+                    padding=ft.padding.all(5),
+                    ink=True
+                )
+            )
+        self.update()
+
+    def toggle_voice_recording(self, e):
+        # Implement voice recording toggle
+        pass
+
+    def attach_photo(self, e):
+        self.page.run_task(self.show_popup, self.tr.translate("not_implemented_title"), self.tr.translate("feature_not_implemented_message"))
+
+    def attach_file(self, e):
+        self.page.run_task(self.show_popup, self.tr.translate("not_implemented_title"), self.tr.translate("feature_not_implemented_message"))
+
+    def attach_contact(self, e):
+        self.page.run_task(self.show_popup, self.tr.translate("not_implemented_title"), self.tr.translate("feature_not_implemented_message"))
+
+    def attach_location(self, e):
+        self.page.run_task(self.show_popup, self.tr.translate("not_implemented_title"), self.tr.translate("feature_not_implemented_message"))
+
+    async def show_feature_pending_dialog(self, feature_name: str):
+        """Shows a standardized dialog for features that are not yet implemented."""
+        await self.show_popup(
+            self.tr.translate("feature_pending_title"),
+            self.tr.translate("feature_pending_message").format(feature_name=feature_name)
+        )
+
+    def search_in_chat(self, e):
+       self.page.run_task(self.show_feature_pending_dialog, self.tr.translate("search_in_chat_tooltip"))
+
+    def clear_chat_history(self, e):
+       self.page.run_task(self.show_feature_pending_dialog, self.tr.translate("clear_history_button"))
+
+    def delete_current_chat(self, e):
+       self.page.run_task(self.show_feature_pending_dialog, self.tr.translate("delete_chat_button"))
+
+    def initiate_call(self, target_username):
+        if not target_username or target_username == 'global':
+            self.page.run_task(self.show_popup, self.tr.translate("error_title"), self.tr.translate("no_call_in_global_chat_message"))
+            return
+
+        if self.webrtc_manager.peer_connections:
+            self.page.run_task(self.show_popup, self.tr.translate("error_title"), self.tr.translate("already_in_call_message"))
+            return
+
+        if self.mode.startswith('p2p') and target_username not in self.contacts:
+            self.page.run_task(self.show_popup, self.tr.translate("add_contact_title"), self.tr.translate("add_contact_to_call_message").format(username=target_username))
+            # In a real app, you might trigger the contact request here.
+            return
+
+        self.page.run_task(self.add_message_to_box, f"Calling {target_username}...", 'global')
+        self.webrtc_manager.start_call(target_username)
+
+    async def open_settings(self, e):
+        if self.page.drawer.open:
+            self.toggle_left_menu(e)
+            await asyncio.sleep(0.3)  # Wait for drawer animation
+        
+        self.settings_dialog = self.create_settings_dialog()
+        self.page.dialog = self.settings_dialog
+        self.settings_dialog.open = True
+        self.update()
+
+    def create_settings_dialog(self):
+        self.settings_controls = {} # Словарь для хранения всех созданных контролов
+        config = self.config_manager.load_config()
+
+        # --- Фабрики для страниц настроек ---
+
+        def create_appearance_settings():
+            username_field = ft.TextField(
+                label=self.tr.translate("username_label"),
+                value=self.username
+            )
+
+            theme_mode_switch = ft.Switch(
+                label=self.tr.translate("dark_mode_label"),
+                value=self.page.theme_mode == ft.ThemeMode.DARK,
+                on_change=self.toggle_theme_mode
+            )
+            
+            language_dropdown = ft.Dropdown(
+                label=self.tr.translate("language_label"),
+                value=config.get('language', 'en'),
+                options=[
+                    ft.dropdown.Option("en", "English"),
+                    ft.dropdown.Option("ru", "Русский"),
+                ]
+            )
+
+            self.settings_controls['username'] = username_field
+            self.settings_controls['theme_mode'] = theme_mode_switch
+            self.settings_controls['language'] = language_dropdown
+            
+            return ft.Column([
+                username_field,
+                ft.Row([ft.Text(self.tr.translate("theme_label")), theme_mode_switch]),
+                language_dropdown
+            ])
+
+        def create_audio_settings():
+            input_slider = ft.Slider(min=0, max=100, divisions=10, value=config.get('input_volume', 80), label=self.tr.translate("input_volume_slider_label"))
+            output_slider = ft.Slider(min=0, max=100, divisions=10, value=config.get('output_volume', 80), label=self.tr.translate("output_volume_slider_label"))
+            self.settings_controls['input_volume'] = input_slider
+            self.settings_controls['output_volume'] = output_slider
+            return ft.Column([
+                ft.Text(self.tr.translate("input_volume_label")), input_slider,
+                ft.Text(self.tr.translate("output_volume_label")), output_slider
+            ])
+
+        def create_hotkey_settings():
+            ptt_label = ft.Text(self.tr.translate("ptt_hotkey_label") + f": {config.get('push_to_talk_hotkey', self.tr.translate('hotkey_not_set'))}")
+            mute_label = ft.Text(self.tr.translate("mute_hotkey_label") + f": {config.get('mute_hotkey', self.tr.translate('hotkey_not_set'))}")
+            self.settings_controls['ptt_hotkey_label'] = ptt_label
+            self.settings_controls['mute_hotkey_label'] = mute_label
+            return ft.Column([
+                ptt_label,
+                ft.ElevatedButton(self.tr.translate("set_ptt_hotkey_button"), on_click=lambda e: self.listen_for_hotkey('ptt')),
+                mute_label,
+                ft.ElevatedButton(self.tr.translate("set_mute_hotkey_button"), on_click=lambda e: self.listen_for_hotkey('mute')),
+            ])
+            
+        def create_security_settings():
+            password_field = ft.TextField(label=self.tr.translate("contact_request_password_label"), value=config.get('contact_request_password', ''), password=True, can_reveal_password=True)
+            self.settings_controls['contact_password'] = password_field
+            return ft.Column([password_field])
+
+        def create_plugin_settings():
+            plugin_list = ft.ListView(spacing=5, padding=0)
+            if self.plugin_manager and self.plugin_manager.loaded_plugins:
+                for name, _ in self.plugin_manager.loaded_plugins.items():
+                    plugin_list.controls.append(ft.Text(name))
+            else:
+                plugin_list.controls.append(ft.Text(self.tr.translate("no_plugins_loaded")))
+
+            def open_plugins_folder(e):
+                plugins_path = os.path.join(os.getcwd(), 'plugins')
+                if not os.path.exists(plugins_path):
+                    os.makedirs(plugins_path)
+                os.startfile(plugins_path)
+
+            return ft.Column([
+                ft.Container(content=plugin_list, height=150, border=ft.border.all(1, self.surface_variant_color), border_radius=8, padding=10),
+                ft.ElevatedButton(self.tr.translate("open_plugins_folder_button"), on_click=open_plugins_folder),
+            ])
+
+        # --- Основная логика диалога ---
+        
+        self.settings_title = ft.Text(self.tr.translate("settings_title"), size=20, weight=ft.FontWeight.BOLD)
+        self.settings_content = ft.Column(expand=True, scroll=ft.ScrollMode.AUTO)
+
+        def show_main_menu(e=None):
+            self.settings_title.value = self.tr.translate("settings_title")
+            self.back_button.visible = False
+            self.settings_content.controls.clear()
+            self.settings_content.controls.extend([
+                ft.Container(
+                    content=ft.ListTile(leading=ft.Icon(ft.icons.PALETTE_OUTLINED), title=ft.Text(self.tr.translate("appearance_settings"))),
+                    on_click=lambda e: show_page(self.tr.translate("appearance_settings"), create_appearance_settings),
+                    border_radius=8,
+                    ink=True
+                ),
+                ft.Container(
+                    content=ft.ListTile(leading=ft.Icon(ft.icons.AUDIOTRACK_OUTLINED), title=ft.Text(self.tr.translate("audio_settings"))),
+                    on_click=lambda e: show_page(self.tr.translate("audio_settings"), create_audio_settings),
+                    border_radius=8,
+                    ink=True
+                ),
+                ft.Container(
+                    content=ft.ListTile(leading=ft.Icon(ft.icons.KEYBOARD_OUTLINED), title=ft.Text(self.tr.translate("hotkeys_settings"))),
+                    on_click=lambda e: show_page(self.tr.translate("hotkeys_settings"), create_hotkey_settings),
+                    border_radius=8,
+                    ink=True
+                ),
+                ft.Container(
+                    content=ft.ListTile(leading=ft.Icon(ft.icons.SECURITY_OUTLINED), title=ft.Text(self.tr.translate("security_settings"))),
+                    on_click=lambda e: show_page(self.tr.translate("security_settings"), create_security_settings),
+                    border_radius=8,
+                    ink=True
+                ),
+                ft.Container(
+                    content=ft.ListTile(leading=ft.Icon(ft.icons.EXTENSION_OUTLINED), title=ft.Text(self.tr.translate("plugins_settings"))),
+                    on_click=lambda e: show_page(self.tr.translate("plugins_settings"), create_plugin_settings),
+                    border_radius=8,
+                    ink=True
+                ),
+            ])
+            self.update()
+
+        def show_page(title, content_factory):
+            self.settings_title.value = title
+            self.back_button.visible = True
+            self.settings_content.controls.clear()
+            self.settings_content.controls.append(content_factory())
+            self.update()
+
+        self.back_button = ft.IconButton(icon=ft.icons.ARROW_BACK, on_click=show_main_menu, visible=False)
+        show_main_menu() # Показать главное меню при инициализации
+
+        return ft.AlertDialog(
+            modal=True,
+            title=ft.Row([self.back_button, self.settings_title]),
+            content=ft.Container(
+                content=self.settings_content,
+                width=400,
+                height=350,
+                padding=ft.padding.symmetric(vertical=10)
+            ),
+            actions=[
+                ft.TextButton(self.tr.translate("save_button"), on_click=self.save_settings, style=ft.ButtonStyle(color=self.primary_purple)),
+                ft.TextButton(self.tr.translate("close_button"), on_click=self.close_settings),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            shape=ft.RoundedRectangleBorder(radius=10),
+        )
+
+    def close_settings(self, e):
+        self.settings_dialog.open = False
+        self.update()
+
+    def save_settings(self, e):
+        config = self.config_manager.load_config()
+        
+        # Собираем значения из словаря self.settings_controls
+        if 'input_volume' in self.settings_controls:
+            config['input_volume'] = self.settings_controls['input_volume'].value
+        if 'output_volume' in self.settings_controls:
+            config['output_volume'] = self.settings_controls['output_volume'].value
+        if 'contact_password' in self.settings_controls:
+            config['contact_request_password'] = self.settings_controls['contact_password'].value
+        if 'language' in self.settings_controls:
+            config['language'] = self.settings_controls['language'].value
+        if 'username' in self.settings_controls:
+            new_username = self.settings_controls['username'].value.strip()
+            if new_username and new_username != self.username:
+                # Username changed, need to handle re-initialization of P2P manager
+                logging.info(f"Username changed from {self.username} to {new_username}")
+                # For now, we just update it. A real app might need to restart networking.
+                self.username = new_username
+                config['username'] = new_username
+                self.update_username_in_ui()
+
+        self.config_manager.save_config(config)
+        
+        # Применяем только те настройки, которые могли быть изменены
+        self.page.run_task(self.apply_audio_settings, config)
+        self.page.run_task(self.apply_language_settings, config)
+        self.hotkey_manager.update_hotkeys(config)
+        
+        self.close_settings(e)
+
+    def listen_for_hotkey(self, key_type):
+        popup_content = ft.Text(self.tr.translate("press_any_key_message"))
+        self.page.dialog = ft.AlertDialog(title=ft.Text(self.tr.translate("listening_for_hotkey_title")), content=popup_content)
+        self.page.dialog.open = True
+        self.update()
+
+        def on_press(key):
+            try:
+                hotkey_str = key.char
+            except AttributeError:
+                hotkey_str = str(key)
+
+            config = self.config_manager.load_config()
+            if key_type == 'ptt':
+                config['push_to_talk_hotkey'] = hotkey_str
+                self.settings_controls['ptt_hotkey_label'].value = self.tr.translate("ptt_hotkey_label") + f": {hotkey_str}"
+            elif key_type == 'mute':
+                config['mute_hotkey'] = hotkey_str
+                self.settings_controls['mute_hotkey_label'].value = self.tr.translate("mute_hotkey_label") + f": {hotkey_str}"
+            
+            self.config_manager.save_config(config)
+            self.hotkey_manager.update_hotkeys(config)
+
+            # Stop the listener and close the popup
+            listener.stop()
+            self.page.dialog.open = False
+            # Re-open the main settings dialog
+            self.open_settings(None)
+            self.update()
+            return False # Stop the listener
+
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
+
+    def toggle_theme_mode(self, e):
+        self.page.theme_mode = ft.ThemeMode.DARK if e.control.value else ft.ThemeMode.LIGHT
+        # Сохраняем настройку
+        config = self.config_manager.load_config()
+        config['theme_mode'] = 'dark' if self.page.theme_mode == ft.ThemeMode.DARK else 'light'
+        self.config_manager.save_config(config)
+        self.update()
+
+    # Manager initialization methods
+    async def init_p2p_mode(self):
         p2p_mode_type = 'local' if self.mode == 'p2p_local' else 'internet'
         self.p2p_manager = P2PManager(self.username, self.chat_history, mode=p2p_mode_type)
+        self.webrtc_manager.p2p_manager = self.p2p_manager
+
         callbacks = {
-            'peer_discovered': self.add_peer, 'peer_lost': self.remove_peer,
+            'peer_discovered': self.on_peer_discovered,
+            'peer_lost': self.on_peer_lost,
             'peer_found': self.on_peer_found,
             'peer_not_found': self.on_peer_not_found,
             'incoming_contact_request': self.on_incoming_contact_request,
@@ -1891,1157 +2004,614 @@ class VoiceChatApp(MDApp):
             'group_call_hang_up': self.handle_group_call_hang_up,
             'user_kicked': self.on_user_kicked,
         }
+
         for event, func in callbacks.items():
             self.p2p_manager.register_callback(event, func)
-        
+
         self.p2p_manager.start()
 
         if not self.p2p_manager.udp_socket:
-            self.add_message_to_box("Failed to initialize P2P networking. Port might be in use.", 'global')
+            await self.add_message_to_box(self.tr.translate("p2p_init_failed_message"), 'global')
             return
+
+        await self.add_message_to_box(self.tr.translate("p2p_started_message").format(mode=p2p_mode_type, username=self.username))
+
+    async def init_bluetooth_mode(self):
+        if not self.bluetooth_manager:
+            self.bluetooth_manager = BluetoothManager(self.username, self.callback_queue)
+            self.bluetooth_manager.register_callback('devices_discovered', self.on_bt_devices_discovered)
+            self.bluetooth_manager.start()
         
-        self.udp_socket = self.p2p_manager.udp_socket
-        self.add_message_to_box(f"P2P {p2p_mode_type} mode started as '{self.username}'.")
-
-    def init_server_mode(self):
-        self.server_manager = ServerManager(self.server_ip, self.server_port, self.username, self.server_password, self.chat_history)
-        callbacks = {
-            'login_failed': lambda p: self.add_message_to_box(f"Login failed: {p.get('reason')}", 'global'),
-            'connection_failed': lambda e: self.add_message_to_box(f"Server connection failed: {e}", 'global'),
-            'disconnected': lambda: self.add_message_to_box("Disconnected from server.", 'global'),
-            'info_received': lambda p: self.add_message_to_box(f"Server: {p.get('message')}", 'global'),
-            'user_list_update': self.on_user_list_update,
-            'group_message_received': self.on_group_message_received,
-            'group_created': self.on_group_created,
-            'incoming_group_invite': self.on_incoming_group_invite,
-            'group_invite_response': self.on_group_invite_response,
-            'group_joined': self.on_group_joined,
-            'history_received': self.on_history_received,
-            'initial_data_received': self.on_initial_data_received,
-            'incoming_group_call': self.on_incoming_group_call,
-            'user_joined_call': self.on_user_joined_call,
-            'user_left_call': self.on_user_left_call,
-            'user_kicked': self.on_user_kicked,
-        }
-        for event, func in callbacks.items():
-            self.server_manager.register_callback(event, func)
-        self.server_manager.start()
-        self.add_message_to_box(f"Connecting to server at {self.server_ip}:{self.server_port} as '{self.username}'...")
-
-    def init_bluetooth_mode(self):
-        self.bluetooth_manager = BluetoothManager(self.username, self.callback_queue)
-        self.bluetooth_manager.start()
-        self.add_message_to_box(self.tr.get('bt_mode_start'), 'global')
+        await self.add_message_to_box(self.tr.translate("bt_started_message"), 'global')
         
-        # Add a scan button
-        self.scan_bt_button = MDRaisedButton(text=self.tr.get('scan_bt_button', 'Scan for Devices'), size_hint_x=1, height=dp(44), size_hint_y=None)
-        self.scan_bt_button.bind(on_press=self.scan_for_bt_devices)
-        # Add to the main vertical controls layout
-        self.root.ids.chat_layout.ids.users_panel_controls.add_widget(self.scan_bt_button)
-        # self.apply_theme() is removed
+        # Clear chat list and add a scan button
+        self.chats_container.controls.clear()
+        scan_btn = ft.ElevatedButton(
+            self.tr.translate("scan_bt_devices_button"),
+            icon=ft.icons.BLUETOOTH_SEARCHING,
+            on_click=self.scan_for_bt_devices,
+            style=ft.ButtonStyle(bgcolor=self.primary_purple)
+        )
+        self.chats_container.controls.append(
+            ft.Container(
+                content=scan_btn,
+                alignment=ft.alignment.center,
+                padding=20
+            )
+        )
+        self.update()
 
-    def scan_for_bt_devices(self, instance):
-        self.add_message_to_box(self.tr.get('bt_scanning'), 'global')
-        # Run discovery in a separate thread to not block the UI
-        threading.Thread(target=self.bluetooth_manager.discover_devices, daemon=True).start()
+    async def init_server_mode(self):
+        # Server login would be implemented here
+        await self.add_message_to_box(self.tr.translate("server_mode_init_message"), 'global')
 
+    def scan_for_bt_devices(self, e):
+        if self.bluetooth_manager:
+            self.page.run_task(self.add_message_to_box, self.tr.translate("bt_scanning_message"), 'global')
+            self.bluetooth_manager.discover_devices()
 
+    def on_bt_devices_discovered(self, devices):
+        self.page.run_task(self.show_bt_devices_dialog, devices)
 
-    def toggle_theme(self, instance):
-        if self.theme_cls.theme_style == "Dark":
-            self.theme_cls.theme_style = "Light"
-            # As per user request: light violet/white-gray
-            self.theme_cls.primary_palette = "Purple"
-            self.theme_cls.primary_hue = "200" # Lighter shade
-            self.theme_cls.theme_style_switch_animation = True
-        else:
-            self.theme_cls.theme_style = "Dark"
-            # As per user request: dark violet/grey
-            self.theme_cls.primary_palette = "Purple"
-            self.theme_cls.primary_hue = "500" # Standard shade
-            self.theme_cls.theme_style_switch_animation = True
-
-    def send_message(self, instance=None):
-        text = self.root.ids.chat_layout.ids.msg_entry.text.strip()
-        if not text:
-            return
-        message_data = {'id': str(uuid.uuid4()), 'sender': self.username, 'text': text, 'timestamp': datetime.now().isoformat()}
-        if self.mode.startswith('p2p') and self.p2p_manager:
-            # Determine if the active chat is a group
-            is_group = self.active_chat in self.p2p_manager.groups
-            
-            if self.active_chat == 'global':
-                # Broadcast to all established contacts in 'global' chat
-                if not self.contacts:
-                    self.show_popup(self.tr.get('cannot_send_title', "Cannot Send"), self.tr.get('must_add_contact_message', "You must add a user as a contact before sending messages."))
-                    return
-                # We can't broadcast to global, so we will send to all contacts instead
-                for contact_user in self.contacts:
-                    self.p2p_manager.send_private_message(contact_user, message_data)
-                self.add_message_to_box(message_data, 'global') # Show in our own global chat
-
-            elif is_group:
-                # Send a message to a specific group
-                self.p2p_manager.send_group_message(self.active_chat, message_data)
-                self.add_message_to_box(message_data, self.active_chat)
-            
-            else:
-                # It's a private message to a specific user (self.active_chat holds the username)
-                self.p2p_manager.send_private_message(self.active_chat, message_data)
-                self.add_message_to_box(message_data, self.active_chat)
-        elif self.mode == 'server' and self.server_manager:
-            if self.active_chat != 'global':
-                self.server_manager.send_group_message(self.active_chat, message_data)
-                self.add_message_to_box(message_data, self.active_chat)
-            else:
-                self.add_message_to_box(self.tr.get('no_global_server_message', "Cannot send global messages in server mode yet."), 'global')
-        elif self.mode == 'p2p_bluetooth' and self.bluetooth_manager:
-            full_message = f"{self.username}: {text}"
-            if self.bluetooth_manager.send_message(full_message):
-                self.add_message_to_box(full_message, 'global')
-            else:
-                self.add_message_to_box(self.tr.get('bt_not_connected'), 'global')
-
-        self.root.ids.chat_layout.ids.msg_entry.text = ""
-        Clock.schedule_once(lambda dt: setattr(self.root.ids.chat_layout.ids.msg_entry, 'focus', True))
-
-    # --- Audio Message Logic ---
-    def toggle_audio_message_record(self, instance):
-        self.is_recording_audio_message = not self.is_recording_audio_message
-        chat_ids = self.root.ids.chat_layout.ids
-        
-        if self.is_recording_audio_message:
-            chat_ids.record_button.icon = "stop"
-            config = self.config_manager.load_config()
-            device_name = config.get('input_device_name', 'Default')
-            input_devices, _ = self.audio_manager.get_devices()
-            device_index = input_devices.get(device_name, sd.default.device[0])
-            
-            # Create a unique filename
-            self.audio_message_path = os.path.join("audio_messages", f"{uuid.uuid4()}.wav")
-            os.makedirs("audio_messages", exist_ok=True)
-
-            if self.audio_manager.start_recording(self.audio_message_path, device_index):
-                self.add_message_to_box("System: Recording audio message...", self.active_chat)
-            else:
-                self.add_message_to_box("System: Failed to start recording.", self.active_chat)
-                self.is_recording_audio_message = False
-                chat_ids.record_button.text = "🎤" # Reset button
-        else:
-            chat_ids.record_button.icon = "microphone"
-            self.audio_manager.stop_recording()
-            self.add_message_to_box(f"System: Recording saved. Ready to send.", self.active_chat)
-            
-            # Create the audio widget and add it to the chat
-            widget = AudioMessageWidget(self.audio_message_path, self.username, self.tr)
-            self.root.ids.chat_layout.ids.chat_box.add_widget(widget)
-            
-            # Send the recorded audio file to the other users in the chat.
-            ft_plugin = self.plugin_manager.get_plugin_by_id('file_transfer')
-            if ft_plugin and ft_plugin['instance']:
-                recipients = []
-                if self.mode.startswith('p2p') and self.p2p_manager and self.active_chat in self.p2p_manager.groups:
-                    recipients = self.p2p_manager.groups[self.active_chat].get('members', [])
-                elif self.mode == 'server' and self.server_manager and self.active_chat in self.server_groups:
-                    recipients = self.server_groups[self.active_chat].get('members', [])
-
-                for user in recipients:
-                    if user != self.username:
-                        print(f"Sending audio message to {user}")
-                        ft_plugin['instance'].send_filepath(self.audio_message_path, user)
-            
-            # The local audio widget serves as confirmation for the sender.
-            # The receiver will get a standard file transfer request.
-            message_data = {'id': str(uuid.uuid4()), 'sender': self.username, 'audio_path': self.audio_message_path, 'timestamp': datetime.now().isoformat()}
-            self.chat_history.setdefault(self.active_chat, []).append(message_data)
-
-
-    # --- Call Logic ---
-    def initiate_call(self, target_username):
-        if self.webrtc_manager.peer_connections:
-            self.add_message_to_box("Error: Already in a call.", 'global')
+    async def show_bt_devices_dialog(self, devices):
+        if not devices:
+            await self.show_popup(self.tr.translate("no_devices_found_title"), self.tr.translate("no_bt_devices_found_message"))
             return
 
-        if self.mode.startswith('p2p') and target_username not in self.contacts:
-            self.request_contact(target_username)
-            return
+        def connect_to_device(e, addr, name):
+            self.close_dialog()
+            self.page.run_task(self.add_message_to_box, f"Connecting to {name} ({addr})...", 'global')
+            self.bluetooth_manager.connect_to_device(addr)
 
-        self.add_message_to_box(f"Calling {target_username}...", 'global')
-        self.webrtc_manager.start_call(target_username)
+        device_list = ft.ListView(spacing=10, padding=20)
+        for addr, name in devices:
+            device_list.controls.append(
+                ft.ListTile(
+                    title=ft.Text(name),
+                    subtitle=ft.Text(addr),
+                    on_click=lambda e, a=addr, n=name: connect_to_device(e, a, n)
+                )
+            )
 
-    def hang_up_call(self, peer_username=None):
-        # Guard against recursive calls from on_dismiss event
-        if getattr(self, '_is_hanging_up', False):
-            return
-        self._is_hanging_up = True
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("nearby_bt_devices_title")),
+            content=ft.Container(
+                content=device_list,
+                width=400,
+                height=300
+            ),
+            actions=[ft.TextButton(self.tr.translate("close_button"), on_click=lambda e: self.close_dialog())]
+        )
+        self.page.dialog.open = True
+        self.update()
 
-        try:
-            if not peer_username:
-                # If no specific peer, hang up all connections
-                for peer in list(self.webrtc_manager.peer_connections.keys()):
-                    self.webrtc_manager.end_call(peer)
-                    if self.p2p_manager: self.p2p_manager.send_webrtc_signal(peer, 'hangup', {})
-            else:
-                self.webrtc_manager.end_call(peer_username)
-                if self.p2p_manager: self.p2p_manager.send_webrtc_signal(peer_username, 'hangup', {})
+    # All the callback methods from the original kivy_client.py
+    # These callbacks are now updated to work with the Flet UI
+    def on_peer_discovered(self, username, address_info):
+        print(f"Peer discovered: {username}")
+        self.page.run_task(self.update_chat_list)
 
-            if self.call_popup:
-                # We must dismiss before setting to None, so the guard is necessary
-                self.call_popup.dismiss()
-                self.call_popup = None
-            self.add_message_to_box("Call ended.", 'global')
-        finally:
-            self._is_hanging_up = False
+    def on_peer_lost(self, username):
+        print(f"Peer lost: {username}")
+        self.page.run_task(self.update_chat_list)
 
-    @mainthread
+    def on_peer_found(self, username):
+        print(f"Peer found: {username}")
+
+    def on_peer_not_found(self, username):
+        self.page.run_task(self.show_popup, self.tr.translate("search_failed_title"), self.tr.translate("user_not_found_message").format(username=username))
+
+    def p2p_message_received(self, message_data):
+        sender = message_data.get('sender')
+        if sender and sender != self.username:
+            # For P2P messages, the sender's username is the chat ID
+            self.page.run_task(self.add_message_to_box, message_data, sender)
+
     def on_webrtc_signal(self, sender, signal_type, data):
         if signal_type == 'offer':
-            self.show_incoming_call_popup(sender, data)
+            self.page.run_task(self.show_incoming_call_dialog, sender, data)
         elif signal_type == 'answer':
-            self.add_message_to_box(f"Call with {sender} accepted and connected.", 'global')
+            self.page.run_task(self.add_message_to_box, f"Call with {sender} accepted and connected.", 'global')
             self.webrtc_manager.handle_answer(sender, data)
-            self.show_call_popup(sender) # Show call UI for initiator only after answer
+            # The initiator shows the call dialog only after the peer answers.
+            self.page.run_task(self.show_call_dialog, sender)
         elif signal_type == 'hangup':
             self.webrtc_manager.end_call(sender)
             if self.call_popup:
-                self.call_popup.dismiss()
-                self.call_popup = None
-            self.add_message_to_box(f"Call with {sender} ended.", 'global')
+                self.call_popup.open = False
+                self.update()
+            self.page.run_task(self.add_message_to_box, f"Call with {sender} ended.", 'global')
         elif signal_type == 'busy':
-            self.add_message_to_box(f"Call failed: {sender} is busy.", 'global')
-            # End our side of the call attempt
-            self.hang_up_call(sender)
+            self.page.run_task(self.add_message_to_box, f"Call failed: {sender} is busy.", 'global')
+            self.page.run_task(self.hang_up_call, sender)
 
-    @mainthread
-    def show_incoming_call_popup(self, peer_username, offer_sdp):
-        if self.webrtc_manager.peer_connections:
-            # Already in a call, reject automatically
-            print(f"Incoming call from {peer_username} while already in another call. Ignoring.")
-            # Future: send a 'busy' signal
-            self.p2p_manager.send_webrtc_signal(peer_username, 'busy', {})
-            return
-
-        accept_btn = MDRaisedButton(text=self.tr.get('accept_button'))
-        decline_btn = MDFlatButton(text=self.tr.get('decline_button'))
-        
-        popup = MDDialog(
-            title=self.tr.get('incoming_call_title'),
-            text=self.tr.get('incoming_call_from', peer=peer_username),
-            buttons=[accept_btn, decline_btn],
-            auto_dismiss=False
-        )
-
-        def accept(instance):
-            popup.dismiss()
-            self.webrtc_manager.handle_offer(peer_username, offer_sdp)
-            self.show_call_popup(peer_username)
-            self.add_message_to_box(f"Accepted call from {peer_username}.", 'global')
-
-        def decline(instance):
-            popup.dismiss()
-            self.p2p_manager.send_webrtc_signal(peer_username, 'hangup', {})
-            self.add_message_to_box(f"Declined call from {peer_username}.", 'global')
-
-        accept_btn.bind(on_press=accept)
-        decline_btn.bind(on_press=decline)
-        popup.open()
-
-    def show_call_popup(self, peer_username):
-        if self.call_popup:
-            self.call_popup.dismiss()
-        
-        self.call_popup = CallPopup(peer_username, self.tr)
-        
-        def on_hang_up(instance):
-            self.hang_up_call(peer_username)
-        
-        def on_mute(instance, is_muted):
-            self.is_muted = is_muted
-            self.webrtc_manager.set_mute(is_muted)
-            self.add_message_to_box(f"Mute is now {'ON' if is_muted else 'OFF'}", 'global')
-
-        self.call_popup.bind(on_dismiss=on_hang_up)
-        self.call_popup.bind(on_mute_toggle=on_mute)
-        self.call_popup.open()
-    # --- UI Update Callbacks ---
-    @mainthread
-    def add_message_to_box(self, message_data, chat_id=None):
-        if chat_id is None:
-            print("WARNING: add_message_to_box called without chat_id. Defaulting to 'global'.")
-            chat_id = 'global'
-        self.chat_history.setdefault(chat_id, []).append(message_data)
-        if self.active_chat != chat_id:
-            return # Don't display if not in active chat
-
-        chat_box = self.root.ids.chat_layout.ids.chat_box
-        font_size = '15sp' # Default font size
-        label_height = dp(30) # Default height
-        
-        if isinstance(message_data, str):
-            display_text = message_data
-            text_for_analysis = message_data
-        elif isinstance(message_data, dict):
-            sender = "You" if message_data.get('sender') == self.username else message_data.get('sender', 'Unknown')
-            # Check if it's an audio message
-            if 'audio_path' in message_data:
-                # Add the audio widget instead of a text label
-                widget = AudioMessageWidget(message_data['audio_path'], sender)
-                chat_box.add_widget(widget)
-                return
-            
-            text = message_data.get('text', '')
-            text_for_analysis = text
-            try:
-                time_str = datetime.fromisoformat(message_data.get('timestamp', '')).strftime("%H:%M:%S")
-                display_text = f"[{time_str}] {sender}: {text}"
-            except:
-                display_text = f"{sender}: {text}"
-        else:
-            return
-
-        # --- Emoji Size Logic ---
-        # This regex finds individual emoji characters
-        emoji_list = regex.findall(r'\X', text_for_analysis)
-        # Check if the message consists ONLY of emojis
-        is_all_emoji = all(regex.match(r'\p{So}', char) for char in emoji_list)
-
-        if is_all_emoji and 1 <= len(emoji_list) <= 3:
-            if len(emoji_list) == 1:
-                font_size = '48sp'
-                label_height = dp(60)
-            elif len(emoji_list) == 2:
-                font_size = '36sp'
-                label_height = dp(50)
-            elif len(emoji_list) == 3:
-                font_size = '28sp'
-                label_height = dp(40)
-        # --- End Emoji Size Logic ---
-
-        label = MDLabel(text=display_text, size_hint_y=None, height=label_height, halign='left', valign='top', opacity=0, font_size=font_size, theme_text_color="Primary")
-        label.bind(width=lambda *x: label.setter('text_size')(label, (label.width, None)))
-        chat_box.add_widget(label)
-        anim = Animation(opacity=1, d=0.3)
-        anim.start(label)
-        self.root.ids.chat_layout.ids.chat_scroll.scroll_y = 0
-
-    @mainthread
-    def p2p_message_received(self, message_data):
-        if message_data.get('sender') != self.username:
-            self.add_message_to_box(message_data, 'global')
-
-    @mainthread
-    def add_peer(self, username, address_info):
-        if username == self.username:
-            return
-        users_list = self.root.ids.chat_layout.ids.users_list
-        for child in users_list.children:
-            if isinstance(child, MDRaisedButton) and child.text.startswith(username):
-                return
-        user_button = MDRaisedButton(text=username, size_hint_y=None, height=dp(40))
-        user_button.bind(on_press=lambda x, u=username: self.switch_chat(u))
-        users_list.add_widget(user_button)
-        self.add_message_to_box(f"System: '{username}' is online.", 'global')
-
-    @mainthread
-    def on_user_list_update(self, users):
-        users_list = self.root.ids.chat_layout.ids.users_list
-        
-        # Simple redraw: clear and add all
-        # A more efficient implementation would diff the lists
-        for child in [c for c in users_list.children if isinstance(c, MDRaisedButton) and not c.text.startswith('[GROUP]')]:
-             users_list.remove_widget(child)
-
-        for username in users:
-            if username == self.username:
-                continue
-            user_button = MDRaisedButton(text=username, size_hint_y=None, height=dp(40))
-            # In server mode, clicking a user will open a private chat
-            user_button.bind(on_press=lambda x, u=username: self.switch_chat(u))
-            users_list.add_widget(user_button)
-
-    @mainthread
-    def remove_peer(self, username):
-        users_list = self.root.ids.chat_layout.ids.users_list
-        widget_to_remove = None
-        for child in users_list.children:
-            if isinstance(child, MDRaisedButton) and child.text.startswith(username):
-                widget_to_remove = child
-                break
-        if widget_to_remove:
-            users_list.remove_widget(widget_to_remove)
-            self.add_message_to_box(f"System: '{username}' went offline.", 'global')
-
-    @mainthread
     def on_secure_channel_established(self, username):
-        self.add_message_to_box(f"System: Secure connection established with {username}.", 'global')
-        users_list = self.root.ids.chat_layout.ids.users_list
-        for child in users_list.children:
-            if isinstance(child, MDRaisedButton) and child.text == username:
-                child.text = f"{username} (Secure)"
-                break
+        self.page.run_task(self.add_message_to_box, f"Secure connection with {username} established.", 'global')
 
-    @mainthread
-    def on_peer_found(self, username):
-        self.add_message_to_box(f"System: Found user '{username}'. They have been added to your user list.", 'global')
-        # The peer_discovered callback will handle adding the button
+    def on_group_created(self, group_id, group_name, admin_username):
+        self.page.run_task(self.add_message_to_box, f"Group '{group_name}' created.", 'global')
+        self.page.run_task(self.update_chat_list)
 
-    @mainthread
-    def on_peer_not_found(self, username):
-        self.show_popup(self.tr.get('search_failed_title', "Search Failed"), self.tr.get('user_not_found_message', "User '{username}' could not be found on the network.", username=username))
+    def on_group_message_received(self, group_id, message_data):
+        self.page.run_task(self.add_message_to_box, message_data, group_id)
 
-    def request_contact(self, target_username):
-        # The password is now handled by the receiver. The sender just sends a plain request.
-        self.p2p_manager.send_contact_request(target_username)
-        self.add_message_to_box(f"System: Contact request sent to '{target_username}'.", 'global')
+    def on_history_received(self, chat_id, history):
+        self.page.run_task(self.add_message_to_box, f"Received history for '{chat_id}'", 'global')
 
-    @mainthread
-    def on_incoming_contact_request(self, sender_username, payload):
-        config = self.config_manager.load_config()
-        my_password = config.get('security', {}).get('p2p_password', '')
+    def on_incoming_group_invite(self, group_id, group_name, admin_username):
+        self.page.run_task(self.show_group_invite_dialog, group_id, group_name, admin_username)
 
-        if not my_password:
-            # No password is set on our end, so show the simple accept/decline popup.
-            popup = ContactRequestPopup(sender_username, self.tr)
-            def handle_response(instance, accepted):
-                self.p2p_manager.send_contact_response(sender_username, accepted)
-                if accepted:
-                    self.contacts.add(sender_username)
-                    self.add_message_to_box(f"System: You are now contacts with {sender_username}.", 'global')
-            popup.bind(on_response=handle_response)
-            popup.open()
+    def on_group_joined(self, group_id, username):
+        self.page.run_task(self.add_message_to_box, f"'{username}' joined group", group_id)
+        self.page.run_task(self.update_chat_list)
+
+    def on_group_invite_response(self, group_id, username, accepted):
+        group_name = self.p2p_manager.groups.get(group_id, {}).get('name', 'the group')
+        if accepted:
+            message = f"{username} accepted your invitation to join {group_name}."
         else:
-            # A password is required. Show the password prompt.
-            popup = PasswordPromptPopup(sender_username, self.tr)
-            def handle_password_submit(instance, entered_password):
-                if entered_password is None: # User cancelled
-                    self.p2p_manager.send_contact_response(sender_username, False)
-                    return
+            message = f"{username} declined your invitation to join {group_name}."
+        self.page.run_task(self.show_popup, self.tr.translate("invitation_response_title"), message)
 
-                my_hash = self.p2p_manager.encryption_manager.hash_password(my_password)
-                entered_hash = self.p2p_manager.encryption_manager.hash_password(entered_password)
+    def on_incoming_group_call(self, group_id, admin_username, sample_rate):
+        self.page.run_task(self.show_incoming_group_call_dialog, group_id, admin_username)
 
-                if my_hash == entered_hash:
-                    self.p2p_manager.send_contact_response(sender_username, True)
-                    self.contacts.add(sender_username)
-                    self.add_message_to_box(f"System: You are now contacts with {sender_username}.", 'global')
-                else:
-                    self.show_popup("Password Incorrect", "The entered password was incorrect.")
-                    self.p2p_manager.send_contact_response(sender_username, False)
+    def handle_group_call_response(self, group_id, username, response):
+        if self.active_group_call == group_id:
+            status = 'joined' if response else 'declined'
+            message = f"{username} has {status} the call."
+            self.page.run_task(self.add_message_to_box, message, group_id)
 
-            popup.bind(on_submit=handle_password_submit)
-            popup.open()
+    def handle_group_call_hang_up(self, group_id, username):
+        if self.active_group_call == group_id:
+            self.page.run_task(self.add_message_to_box, f"{username} left the call.", group_id)
+        if username == self.username:
+            self.active_group_call = None
+            if self.group_call_popup:
+                self.group_call_popup.open = False
+                self.update()
 
-    @mainthread
+    def on_user_kicked(self, group_id, kicked_username, admin_username):
+        group_name = self.p2p_manager.groups.get(group_id, {}).get('name', 'a group')
+        if kicked_username == self.username:
+            message = f"You have been kicked from '{group_name}' by {admin_username}."
+            self.page.run_task(self.show_popup, self.tr.translate("kicked_from_group_title"), message)
+            if self.active_chat == group_id:
+                self.switch_chat('global')
+        else:
+            message = f"{kicked_username} was kicked from '{group_name}' by {admin_username}."
+            self.page.run_task(self.add_message_to_box, message, group_id)
+        
+        self.page.run_task(self.update_chat_list)
+
+    def on_incoming_contact_request(self, sender_username, payload):
+        self.page.run_task(self.show_incoming_contact_request_dialog, sender_username, payload)
+
     def on_contact_request_response(self, sender_username, accepted):
         if accepted:
             self.contacts.add(sender_username)
-            self.show_popup(self.tr.get('contact_added_title', "Contact Added"), self.tr.get('contact_request_accepted_message', "'{sender_username}' accepted your contact request.", sender_username=sender_username))
+            self.page.run_task(self.show_popup, self.tr.translate("contact_added_title"), self.tr.translate("contact_request_accepted_message").format(username=sender_username))
+            self.page.run_task(self.update_chat_list)
         else:
-            self.show_popup(self.tr.get('request_declined_title', "Request Declined"), self.tr.get('contact_request_declined_message', "'{sender_username}' declined your contact request.", sender_username=sender_username))
+            self.page.run_task(self.show_popup, self.tr.translate("request_declined_title"), self.tr.translate("contact_request_declined_message").format(username=sender_username))
 
-    # --- History Sync Logic ---
-    @mainthread
-    def on_history_received(self, chat_id, history):
-        self.add_message_to_box(f"System: Received history for '{chat_id}' ({len(history)} messages).", 'global')
-        # A simple merge: replace local history with the received one if it's longer.
-        # A more sophisticated merge could be implemented later.
-        if len(history) > len(self.chat_history.get(chat_id, [])):
-            self.chat_history[chat_id] = history
-            if self.active_chat == chat_id:
-                # Refresh the view
-                self.switch_chat(chat_id)
+    def on_user_list_update(self, users):
+        # User list update handling
+        pass
 
-    # --- Group Chat Logic ---
-    def show_create_group_popup(self, instance):
-        self.group_name_input = MDTextField(hint_text=self.tr.get('enter_group_name_label', "Enter group name:"))
-        
-        ok_button = MDRaisedButton(text=self.tr.get('create_button', "Create"))
-        cancel_button = MDFlatButton(text=self.tr.get('cancel_button', "Cancel"))
-
-        popup = MDDialog(
-            title=self.tr.get('create_group_title', "Create Group"),
-            type="custom",
-            content_cls=self.group_name_input,
-            buttons=[ok_button, cancel_button]
-        )
-        
-        ok_button.bind(on_press=lambda x: self.create_group(popup))
-        cancel_button.bind(on_press=popup.dismiss)
-        popup.open()
-
-    def create_group(self, popup):
-        group_name = self.group_name_input.text.strip()
-        if not group_name:
-            popup.dismiss()
-            return
-        if self.mode.startswith('p2p'):
-            if self.p2p_manager:
-                self.p2p_manager.create_group(group_name)
-        elif self.mode == 'server':
-            if self.server_manager:
-                self.server_manager.create_group(group_name)
-        popup.dismiss()
-
-    @mainthread
-    def on_group_created(self, group_id, group_name, admin_username):
-        self.add_message_to_box(f"System: You created group '{group_name}'.", 'global')
-        self.add_group_to_list(group_id, group_name)
-        self.switch_chat(group_id)
-
-    @mainthread
-    def on_group_message_received(self, group_id, message_data):
-        self.add_message_to_box(message_data, group_id)
-
-    @mainthread
-    def add_group_to_list(self, group_id, group_name):
-        users_list = self.root.ids.chat_layout.ids.users_list
-        group_button = MDRaisedButton(text=f"[GROUP] {group_name}", size_hint_y=None, height=dp(40))
-        group_button.bind(on_press=lambda x: self.switch_chat(group_id))
-        users_list.add_widget(group_button)
-
-    def switch_chat(self, chat_id):
-        self.active_chat = chat_id
-        chat_box = self.root.ids.chat_layout.ids.chat_box
-        chat_box.clear_widgets()
-        history = self.chat_history.get(chat_id, [])
-        for message_data in history:
-            self.add_message_to_box(message_data, chat_id)
-
-        # --- Configure Context Buttons ---
-        # Unbind old handlers first to prevent multiple bindings
-        if self._primary_context_handler:
-            self.primary_context_button.unbind(on_press=self._primary_context_handler)
-            self._primary_context_handler = None
-        if self._secondary_context_handler:
-            self.secondary_context_button.unbind(on_press=self._secondary_context_handler)
-            self._secondary_context_handler = None
-
-        # --- Handle different chat contexts ---
-        if chat_id == 'global':
-            Window.title = self.tr.get('window_title', "JustMessenger")
-            self.primary_context_button.opacity = 0
-            self.primary_context_button.disabled = True
-            self.secondary_context_button.opacity = 0
-            self.secondary_context_button.disabled = True
-            return
-
-        is_group = False
-        is_admin = False
-        group_info = {}
-
-        if self.mode.startswith('p2p') and self.p2p_manager and chat_id in self.p2p_manager.groups:
-            group_info = self.p2p_manager.groups.get(chat_id, {})
-            is_group = True
-        elif self.mode == 'server' and chat_id in self.server_groups:
-            group_info = self.server_groups.get(chat_id, {})
-            is_group = True
-
-        if is_group:
-            group_name = group_info.get('name', 'Group')
-            Window.title = f"{self.tr.get('window_title', 'JustMessenger')} - {group_name}"
-            is_admin = group_info.get('admin') == self.username
-
-            # Primary: Call Group
-            self.primary_context_button.text = self.tr.get('call_button_short', 'Call')
-            self._primary_context_handler = self.start_group_call
-            self.primary_context_button.bind(on_press=self._primary_context_handler)
-            self.primary_context_button.opacity = 1
-            self.primary_context_button.disabled = False
-            
-            if is_admin:
-                # Secondary: Manage Group (which includes inviting)
-                self.secondary_context_button.text = self.tr.get('manage_button', 'Manage')
-                self._secondary_context_handler = self.show_manage_group_popup
-                self.secondary_context_button.bind(on_press=self._secondary_context_handler)
-                self.secondary_context_button.opacity = 1
-                self.secondary_context_button.disabled = False
-            else:
-                self.secondary_context_button.opacity = 0
-                self.secondary_context_button.disabled = True
-
-        else: # It's a user chat
-            Window.title = f"{self.tr.get('window_title', 'JustMessenger')} - {chat_id}"
-            
-            # Primary: Call User
-            self.primary_context_button.text = self.tr.get('call_button_short', 'Call')
-            # Use a lambda to pass the specific user at time of binding
-            self._primary_context_handler = lambda instance: self.initiate_call(chat_id)
-            self.primary_context_button.bind(on_press=self._primary_context_handler)
-            self.primary_context_button.opacity = 1
-            self.primary_context_button.disabled = False
-            
-            # No secondary action for private chats
-            self.secondary_context_button.opacity = 0
-            self.secondary_context_button.disabled = True
-
-    def show_group_call_popup(self):
-        group_name = self.p2p_manager.groups.get(self.active_group_call, {}).get('name', '')
-        self.group_call_popup = GroupCallPopup(group_name, self.tr)
-        self.group_call_popup.bind(on_dismiss=lambda x: self.hang_up_call())
-        self.group_call_popup.open()
-        # Initial population of the participants list
-        self.update_group_members_ui(self.active_group_call)
-
-    def update_group_members_ui(self, group_id):
-        """Refreshes the displayed list of members for a group call."""
-        if not self.group_call_popup or group_id != self.active_group_call:
-            return
-
-        if self.mode.startswith('p2p'):
-            members = self.p2p_manager.groups.get(group_id, {}).get('members', [])
-        elif self.mode == 'server':
-            members = self.server_groups.get(group_id, {}).get('members', [])
-        else:
-            members = []
-
-        # Clear existing member widgets
-        self.group_call_popup.participants_list.clear_widgets()
-        
-        # Add a label for each member
-        for member in members:
-            self.group_call_popup.participants_list.add_widget(MDLabel(text=member, halign="center"))
-
-    @mainthread
-    def on_group_joined(self, group_id, username):
-        if group_id == self.active_chat:
-            self.add_message_to_box(f"System: '{username}' has joined the group.", group_id)
-
-    @mainthread
-    def on_incoming_group_invite(self, group_id, group_name, admin_username):
-        box = MDBoxLayout(orientation='vertical', spacing=10, padding=10)
-        yes_btn = MDRaisedButton(text=self.tr.get('accept_button', 'Accept'))
-        no_btn = MDFlatButton(text=self.tr.get('decline_button', 'Decline'))
-
-        popup = MDDialog(
-            title=self.tr.get('group_invitation_title', "Group Invitation"),
-            text=self.tr.get('group_invite_message', "You are invited to join the group '{group_name}' by {admin_username}.", group_name=group_name, admin_username=admin_username),
-            buttons=[yes_btn, no_btn],
-            auto_dismiss=False
-        )
-
-        def on_yes(inst):
-            if self.mode.startswith('p2p'):
-                self.p2p_manager.send_group_invite_response(group_id, admin_username, True)
-            elif self.mode == 'server':
-                self.server_manager.send_group_invite_response(group_id, True)
-            
-            # The server will confirm our membership, which will trigger adding the group to the list
-            # self.add_group_to_list(group_id, group_name)
-            # self.switch_chat(group_id)
-            popup.dismiss()
-
-        def on_no(inst):
-            if self.mode.startswith('p2p'):
-                self.p2p_manager.send_group_invite_response(group_id, admin_username, False)
-            elif self.mode == 'server':
-                self.server_manager.send_group_invite_response(group_id, False)
-            popup.dismiss()
-
-        yes_btn.bind(on_press=on_yes)
-        no_btn.bind(on_press=on_no)
-        popup.open()
-
-    @mainthread
-    def on_group_invite_response(self, group_id, username, accepted):
-        if not accepted:
-            self.add_message_to_box(f"System: '{username}' declined the invitation to join.", group_id)
-
-    def show_invite_user_popup(self, instance):
-        if self.mode.startswith('p2p'):
-            if not self.p2p_manager or not self.p2p_manager.peers:
-                self.add_message_to_box(self.tr.get('no_users_to_invite_message', "System: No users online to invite."), self.active_chat)
-                return
-            current_members = self.p2p_manager.groups.get(self.active_chat, {}).get('members', set())
-            available_users = [u for u in self.p2p_manager.peers.keys() if u not in current_members]
-        elif self.mode == 'server':
-            if not self.server_manager: return
-            # Assuming server_manager holds the user list
-            all_users = [c.text for c in self.root.ids.chat_layout.ids.users_list.children if isinstance(c, MDRaisedButton) and not c.text.startswith('[GROUP]')]
-            current_members = self.server_groups.get(self.active_chat, {}).get('members', [])
-            available_users = [u for u in all_users if u not in current_members]
-        else:
-            return
-
-        if not available_users:
-            self.add_message_to_box(self.tr.get('all_users_in_group_message', "System: All available users are already in the group."), self.active_chat)
-            return
-
-        box = MDBoxLayout(orientation='vertical', spacing=10, padding=10)
-        box.add_widget(MDLabel(text=self.tr.get('select_user_to_invite_label', "Select a user to invite:")))
-        popup = MDDialog(title=self.tr.get('invite_user_title', "Invite User"), type="custom", content_cls=box)
-        for username in available_users:
-            btn = MDRaisedButton(text=username)
-            btn.bind(on_press=lambda x, u=username: self.invite_user(u, popup))
-            box.add_widget(btn)
-        popup.open()
-
-    def invite_user(self, username, popup):
-        popup.dismiss()
-        if self.active_chat == 'global': return
-
-        if self.mode.startswith('p2p'):
-            self.p2p_manager.send_group_invite(self.active_chat, username)
-        elif self.mode == 'server':
-            self.server_manager.invite_to_group(self.active_chat, username)
-        
-        self.add_message_to_box(f"System: Invitation sent to '{username}'.", self.active_chat)
-
-    def show_manage_group_popup(self, instance):
-        if self.active_chat == 'global':
-            return
-
-        if self.mode.startswith('p2p'):
-            group_info = self.p2p_manager.groups.get(self.active_chat, {})
-            members = group_info.get('members', set())
-        elif self.mode == 'server':
-            group_info = self.server_groups.get(self.active_chat, {})
-            members = group_info.get('members', [])
-        else:
-            return
-        
-        # Admin cannot kick themselves
-        members_to_manage = [m for m in members if m != self.username]
-        
-        if not members_to_manage:
-            self.add_message_to_box("System: No other members to manage.", self.active_chat)
-            return
-
-        popup = ManageGroupPopup(self.tr, members_to_manage)
-        popup.bind(on_kick_user=self.on_kick_user_selected)
-        popup.bind(on_invite_user=lambda x: self.show_invite_user_popup(None))
-        popup.open()
-
-    def on_kick_user_selected(self, popup, username):
-        # The message will be added via the callback on_user_kicked
-        if self.mode.startswith('p2p'):
-            self.p2p_manager.kick_user_from_group(self.active_chat, username)
-        elif self.mode == 'server':
-            self.server_manager.kick_user_from_group(self.active_chat, username)
-
-    # --- Group Call Logic ---
-    def start_group_call(self, instance):
-        if self.active_chat == 'global' or self.active_group_call or self.webrtc_manager.peer_connections:
-            return
-        
-        config = self.config_manager.load_config()
-        
-        self.active_group_call = self.active_chat
-        
-        if self.mode.startswith('p2p'):
-            self.p2p_manager.start_group_call(self.active_group_call, supported_rate)
-            self.add_message_to_box("Starting P2P group call...", self.active_group_call)
-            self.show_group_call_popup()
-            # Since we are the admin, we automatically "join"
-            self.join_group_call(self.active_group_call)
-        elif self.mode == 'server':
-            self.server_manager.start_group_call(self.active_group_call, supported_rate)
-            self.add_message_to_box("Requesting server to start group call...", self.active_group_call)
-            # We will join after getting our public UDP address
-            self.join_server_group_call(self.active_group_call)
-
-    def join_group_call(self, group_id):
-        if self.mode.startswith('p2p'):
-            self.active_group_call = group_id
-            self.show_group_call_popup()
-            # Initiate hole punch with all other members
-            members = self.p2p_manager.groups.get(group_id, {}).get('members', set())
-            for member in members:
-                if member != self.username:
-                    self.pending_group_call_punches.add(member)
-                    self.p2p_manager.initiate_hole_punch(member)
-        elif self.mode == 'server':
-            self.join_server_group_call(group_id)
-
-    @mainthread
-    def on_incoming_group_call(self, group_id, admin_username, sample_rate):
-        if self.active_group_call or self.webrtc_manager.peer_connections:
-            # Decline if already in a call
-            # self.p2p_manager.send_group_call_response(group_id, 'reject') # Maybe not needed
-            return
-
-        box = MDBoxLayout(orientation='vertical', spacing=10, padding=10)
-        group_name = self.p2p_manager.groups.get(group_id, {}).get('name', '') if self.mode.startswith('p2p') else self.server_groups.get(group_id, {}).get('name', '')
-        box.add_widget(MDLabel(text=f"Incoming group call from '{admin_username}' for group '{group_name}'."))
-        
-        yes_btn = MDRaisedButton(text='Join')
-        no_btn = MDFlatButton(text='Decline')
-
-        popup = MDDialog(
-            title="Incoming Group Call",
-            type="custom",
-            content_cls=box,
-            buttons=[yes_btn, no_btn],
-            auto_dismiss=False
-        )
-
-        def on_yes(inst):
-            self.negotiated_rate = sample_rate
-            if self.mode.startswith('p2p'):
-                self.p2p_manager.send_group_call_response(group_id, 'accept')
-            # For server mode, joining is the response
-            self.join_group_call(group_id)
-            popup.dismiss()
-
-        def on_no(inst):
-            if self.mode.startswith('p2p'):
-                self.p2p_manager.send_group_call_response(group_id, 'reject')
-            # No explicit rejection needed for server mode, just don't join.
-            popup.dismiss()
-
-        yes_btn.bind(on_press=on_yes)
-        no_btn.bind(on_press=on_no)
-        popup.open()
-
-    @mainthread
-    def handle_group_call_response(self, group_id, username, response):
-        if group_id != self.active_group_call:
-            return
-        
-        if response == 'accept':
-            self.add_message_to_box(f"System: {username} accepted the call. Connecting...", group_id)
-            self.pending_group_call_punches.add(username)
-            self.p2p_manager.initiate_hole_punch(username)
-        else:
-            self.add_message_to_box(f"System: {username} declined the call.", group_id)
-
-    @mainthread
-    def handle_group_call_hang_up(self, group_id, username):
-        if group_id == self.active_group_call:
-            # self.audio_threads was part of the old implementation
-            self.add_message_to_box(f"System: {username} left the call.", group_id)
-            self.update_group_members_ui(group_id)
-
-
-    def join_server_group_call(self, group_id):
-        self.active_group_call = group_id
-        self.show_group_call_popup()
-        
-        # Get public address and inform server
-        public_addr = self.get_public_udp_addr()
-        self.server_manager.join_group_call(group_id, public_addr)
-        
-        # Start audio stream to the server
-        config = self.config_manager.load_config()
-        server_addr = (self.server_manager.host, self.server_manager.port)
-        try:
-            # In server mode, we use p2p_audio_thread for the single stream to the server
-            self.add_message_to_box("Connected to group call via server.", group_id)
-        except Exception as e:
-            self.add_message_to_box(f"Error starting server audio stream: {e}", group_id)
-
-    @mainthread
-    def on_user_joined_call(self, group_id, username):
-        if group_id == self.active_group_call:
-            self.add_message_to_box(f"System: {username} joined the call.", group_id)
-            self.update_group_members_ui(group_id)
-
-    @mainthread
-    def on_user_left_call(self, group_id, username):
-        if group_id == self.active_group_call:
-            self.add_message_to_box(f"System: {username} left the call.", group_id)
-            self.update_group_members_ui(group_id)
-
-    @mainthread
     def on_initial_data_received(self, groups, users):
-        self.add_message_to_box("System: Received initial state from server.", 'global')
-        self.server_groups.update(groups) # Use update to be safe
-        self.on_user_list_update(users)
-        for group_id, group_data in groups.items():
-            # Check if user is a member before adding to list
-            if self.username in group_data.get('members', []):
-                self.add_group_to_list(group_id, group_data['name'])
+        # Initial data handling
+        pass
 
+    def on_user_joined_call(self, group_id, username):
+        # User joined call handling
+        pass
 
-    @mainthread
-    def on_user_kicked(self, group_id, kicked_username, admin_username):
-        # Using Clock.schedule_once to avoid modifying UI from a network thread directly
-        # Although this callback is already decorated with @mainthread, this is safer
-        # in case of complex UI updates.
-        
-        if kicked_username == self.username:
-            # You have been kicked
-            self.show_popup(self.tr.get('kicked_from_group_title', "Kicked from Group"), self.tr.get('you_were_kicked_message', "You have been kicked from the group '{group_name}' by {admin_username}.", group_name=self.p2p_manager.groups.get(group_id, {}).get('name'), admin_username=admin_username))
-            
-            if self.active_chat == group_id:
-                self.switch_chat('global') # Switch to global chat
-            
-            # Remove the group from the UI list
-            button_to_remove = None
-            for button in self.root.ids.chat_layout.ids.users_list.children:
-                if button.text == f"[GROUP] {self.p2p_manager.groups.get(group_id, {}).get('name')}":
-                    button_to_remove = button
-                    break
-            if button_to_remove:
-                self.root.ids.chat_layout.ids.users_list.remove_widget(button_to_remove)
+    def on_user_left_call(self, group_id, username):
+        # User left call handling
+        pass
 
-            # Clean up local data
-            if group_id in self.chat_history:
-                del self.chat_history[group_id]
-            if self.mode.startswith('p2p') and group_id in self.p2p_manager.groups:
-                group_name = self.p2p_manager.groups[group_id].get('name', '')
-                del self.p2p_manager.groups[group_id]
-            elif self.mode == 'server' and group_id in self.server_groups:
-                group_name = self.server_groups[group_id].get('name', '')
-                del self.server_groups[group_id]
-            else:
-                group_name = "Unknown Group"
-
-            self.show_popup(self.tr.get('kicked_from_group_title', "Kicked from Group"), self.tr.get('you_were_kicked_message', "You have been kicked from the group '{group_name}' by {admin_username}.", group_name=group_name, admin_username=admin_username))
-
-            if self.active_chat == group_id:
-                self.switch_chat('global')
-
-            button_to_remove = None
-            for button in self.root.ids.chat_layout.ids.users_list.children:
-                if button.text == f"[GROUP] {group_name}":
-                    button_to_remove = button
-                    break
-            if button_to_remove:
-                self.root.ids.chat_layout.ids.users_list.remove_widget(button_to_remove)
-
-            if group_id in self.chat_history:
-                del self.chat_history[group_id]
-
-        else:
-            # Another user was kicked
-            message = f"System: {kicked_username} was kicked by {admin_username}."
-            self.add_message_to_box(message, group_id)
-            self.update_group_members_ui(group_id)
-
-    def create_emoji_panel(self):
-        emoji_panel = self.root.ids.chat_layout.ids.emoji_panel
-        tab_panel = MDTabs()
-        tab_panel.bind(on_tab_switch=self.on_emoji_tab_switch)
-        categorized_emojis = self.emoji_manager.get_categorized_emojis()
-
-        class EmojiCategoryTab(MDFloatLayout, MDTabsBase):
-            pass
-
-        for category, emojis in categorized_emojis.items():
-            # Use markup to control font size in tab title
-            tab = EmojiCategoryTab(title=f"[size=12sp]{category}[/size]")
-            
-            scroll_view = ScrollView(scroll_type=['bars', 'content'], bar_width=dp(10), scroll_wheel_distance=dp(40))
-            grid = MDGridLayout(cols=1, spacing=dp(5), size_hint_y=None)
-            grid.bind(minimum_height=grid.setter('height'))
-            
-            # Store grid and emojis for lazy loading
-            tab.grid = grid
-            tab.emojis = emojis
-            tab.loaded = False # Flag to check if content is loaded
-            
-            scroll_view.add_widget(grid)
-            tab.add_widget(scroll_view)
-            tab_panel.add_widget(tab)
-            
-        emoji_panel.add_widget(tab_panel)
-        # Manually trigger the load for the first tab
-        if tab_panel.get_tab_list():
-            self.on_emoji_tab_switch(tab_panel, tab_panel.get_tab_list()[0], None, None)
-
-    def on_emoji_tab_switch(self, instance_tabs, instance_tab, instance_tab_label, tab_text):
-        """Loads the content of an emoji tab only when it's selected."""
-        if not hasattr(instance_tab, 'loaded') or instance_tab.loaded:
-            return
-
-        grid = instance_tab.grid
-        emojis = instance_tab.emojis
-        
-        def update_cols(grid_layout, scroll_view_instance, width):
-            if width <= 0: return
-            new_cols = max(1, int(width / dp(45)))
-            grid_layout.cols = new_cols
-
-        scroll_view = grid.parent
-        scroll_view.bind(width=partial(update_cols, grid))
-
-        for emoji in emojis:
-            btn = MDIconButton(
-                icon=emoji,
-                font_name='EmojiFont',
-                font_size='24sp',
-                size_hint=(None, None),
-                size=(dp(40), dp(40)),
-            )
-            btn.emoji_char = emoji
-            btn.bind(on_press=self.add_emoji_to_input)
-            grid.add_widget(btn)
-        
-        instance_tab.loaded = True
-
-    def toggle_emoji_panel(self, instance):
-        emoji_panel = self.root.ids.chat_layout.ids.emoji_panel
-        panel_target_width = 300
-
-        if emoji_panel.width > 0:
-            new_window_width = Window.width - emoji_panel.width
-            Window.size = (new_window_width, Window.height)
-            
-            panel_anim = Animation(width=0, opacity=0, d=0.2, t='out_quad')
-            panel_anim.start(emoji_panel)
-            emoji_panel.disabled = True
-        else:
-            new_window_width = Window.width + panel_target_width
-            Window.size = (new_window_width, Window.height)
-
-            panel_anim = Animation(width=panel_target_width, opacity=1, d=0.2, t='out_quad')
-            panel_anim.start(emoji_panel)
-            emoji_panel.disabled = False
-
-    def add_emoji_to_input(self, instance):
-        self.root.ids.chat_layout.ids.msg_entry.text += instance.emoji_char
-        self.root.ids.chat_layout.ids.msg_entry.focus = True
-
-    def show_popup(self, title, message):
-        ok_button = MDRaisedButton(text="OK")
-        popup = MDDialog(
-            title=title,
-            text=message,
-            buttons=[ok_button]
-        )
-        ok_button.bind(on_press=popup.dismiss)
-        popup.open()
-
-    def on_request_close(self, *args, **kwargs):
-        if self.settings_popup:
-            self.settings_popup.dismiss()
-            return True
-        return False
-
-    def on_stop(self):
-        if self.p2p_manager:
-            self.p2p_manager.stop()
-        if self.server_manager:
-            self.server_manager.stop()
-        if self.bluetooth_manager:
-            self.bluetooth_manager.stop()
-        if hasattr(self, 'udp_socket') and self.udp_socket:
-            self.udp_socket.close()
-        if self.plugin_manager:
-            self.plugin_manager.unload_plugins()
-        if self.hotkey_manager:
-            self.hotkey_manager.stop()
-        print("Application stopped.")
-
-    # --- Hotkey Logic ---
-    def init_hotkeys(self):
-        config = self.config_manager.load_config()
-        hotkey_str = config.get('hotkeys', {}).get('mute', 'ctrl+m')
-        
-        keys = set()
-        parts = hotkey_str.split('+')
-        for part in parts:
-            part = part.strip()
-            try:
-                keys.add(keyboard.Key[part])
-            except KeyError:
-                if len(part) == 1:
-                    keys.add(keyboard.KeyCode.from_char(part))
-
-        if keys:
-            self.hotkey_manager.set_hotkey(keys)
-        
-        self.hotkey_manager.register_callback(self.toggle_mute_hotkey)
-        self.hotkey_manager.start()
-
-    def show_settings_popup(self, instance):
-        try:
-            config = self.config_manager.load_config()
-            # Pass the app instance to the settings popup so it can access the plugin manager
-            self.settings_popup = SettingsPopup(self.tr, config, app=self)
-            self.settings_popup.bind(on_dismiss=self.on_settings_dismiss)
-            self.settings_popup.open()
-        except Exception as e:
-            import traceback
-            error_str = traceback.format_exc()
-            print(f"CRASH IN SETTINGS: {error_str}")
-            self.show_popup("Error", f"Could not open settings:\n{e}")
-
-    def on_settings_dismiss(self, popup):
-        self.settings_popup = None
-
-        # Only apply changes if the user clicked "Save"
-        if not getattr(popup, 'saved', False):
-            return
-
-        # The popup has already modified this config object in memory.
-        # We just need to apply the changes and then save it.
-        config = popup.config
-        
-        # Handle hotkey changes
-        new_hotkey = getattr(popup, 'hotkey', None)
-        if new_hotkey:
-            self.hotkey_manager.set_hotkey(new_hotkey)
-            if 'hotkeys' not in config:
-                config['hotkeys'] = {}
-            hotkey_str = ' + '.join(SettingsPopup.key_to_str(k) for k in new_hotkey)
-            config['hotkeys']['mute'] = hotkey_str
-            self.add_message_to_box(self.tr.get('system_hotkey_set', hotkey=hotkey_str), 'global')
-
-        # Apply audio settings from the now-updated config
-        self.add_message_to_box(self.tr.get('system_audio_settings_saved', 'Audio settings saved.'), 'global')
-        self.apply_audio_settings(config)
-       
-        # Apply language change if it happened
-        new_lang = config.get('language', 'en')
-        if self.tr.get_language() != new_lang:
-            self.tr.set_language(new_lang)
-            # We might need to recreate the UI to apply language changes,
-            # which is complex. For now, we'll just show a message.
-            # A full implementation would require a restart or dynamic UI recreation.
-            self.show_popup(self.tr.get('language_changed_title', "Language Changed"), self.tr.get('language_change_restart_message', "The language will fully update on next restart."))
-            Window.title = self.tr.get('window_title') # Update title immediately
-
-        self.config_manager.save_config(config)
-
-    @mainthread
-    def toggle_mute_hotkey(self):
-        self.is_muted = not self.is_muted
-        
-        # Mute/unmute WebRTC call
-        self.webrtc_manager.set_mute(self.is_muted)
-        
-        # Update UI
-        if self.call_popup:
-            self.call_popup.is_muted = self.is_muted
-            self.call_popup.mute_button.text = self.tr.get('unmute_button') if self.is_muted else self.tr.get('mute_button')
-        
-        if self.is_muted:
-            self.add_message_to_box(self.tr.get('system_audio_muted'), 'global')
-        else:
-            self.add_message_to_box(self.tr.get('system_audio_unmuted'), 'global')
-
-
-    def apply_audio_settings(self, config):
-        # Applies audio settings from the config to the AudioManager
+    async def apply_audio_settings(self, config):
         input_volume = config.get('input_volume', 80)
         output_volume = config.get('output_volume', 80)
 
-        # Convert slider value [0, 100] to a gain multiplier [0.0, 1.0]
-        # Ensure we handle potential None values gracefully, defaulting to 80.
         input_gain = (input_volume or 80) / 100.0
         output_gain = (output_volume or 80) / 100.0
-        
+
         self.audio_manager.set_volume(input_gain, 'input')
         self.audio_manager.set_volume(output_gain, 'output')
 
-    def on_file_drop(self, window, file_path, x, y):
-        """Callback for when a file is dropped onto the window."""
-        try:
-            filepath_str = file_path.decode('utf-8')
-            print(f"File dropped: {filepath_str}")
-            if self.plugin_manager:
-                # Find the file transfer plugin and call its handler
-                ft_plugin = self.plugin_manager.get_plugin_by_id('file_transfer')
-                if ft_plugin and ft_plugin['instance']:
-                    ft_plugin['instance'].handle_dropped_file(filepath_str)
-                else:
-                    self.add_message_to_box("System: File transfer plugin not loaded.", 'global')
-        except Exception as e:
-            print(f"Error handling dropped file: {e}")
-            self.add_message_to_box(f"Error handling drop: {e}", 'global')
+        await self.add_message_to_box(self.tr.translate("audio_settings_applied_message"), 'global')
+
+    # --- Language and Theme Settings ---
+    async def apply_language_settings(self, config):
+        lang = config.get('language', 'en')
+        if self.tr.get_language() != lang:
+            self.tr.set_language(lang)
+            await self.rebuild_ui_with_translation()
+            await self.show_popup(
+                self.tr.translate("language_changed_title"),
+                self.tr.translate("language_change_restart_message")
+            )
+
+    async def rebuild_ui_with_translation(self):
+        """
+        This method updates the text of all UI components after a language change.
+        It's crucial to update every visible text element here.
+        """
+        print("Rebuilding UI with new translations...")
+
+        # Page Title
+        self.page.title = self.tr.get("app_title")
+
+        # Left Panel (Chat List)
+        self.search_field.hint_text = self.tr.translate("search_chats_hint")
+        # The main title "JustMessenger" is also in the toolbar
+        if isinstance(self.chat_list_panel.controls[0].content.controls[1], ft.Text):
+            self.chat_list_panel.controls[0].content.controls[1].value = self.tr.translate("app_title")
+
+        # Left Menu (Hamburger Menu)
+        self.menu_username.value = self.username if self.username else self.tr.translate("username_label")
+        # Drawer contains a Column, which contains the header Container and the menu_items Column
+        if self.page.drawer and self.page.drawer.controls:
+            menu_items_column = self.page.drawer.controls[0].controls[1]
+            menu_items_column.controls[0].title.value = self.tr.translate("new_group_menu")
+            menu_items_column.controls[1].title.value = self.tr.translate("contacts_menu")
+            menu_items_column.controls[2].title.value = self.tr.translate("settings_menu")
+
+        # Center Panel (Chat View)
+        self.update_chat_header(self.active_chat) # This handles chat title and status
+        self.chat_header.content.controls[1].controls[0].tooltip = self.tr.translate("search_in_chat_tooltip")
+        self.chat_header.content.controls[1].controls[1].tooltip = self.tr.translate("voice_call_tooltip")
+
+        # Input Area
+        self.message_input.hint_text = self.tr.translate("message_hint")
+        self.input_area.content.controls[0].content.controls[0].controls[0].value = self.tr.translate("edit_message_label") # Edit message title
+        self.input_area.content.controls[1].content.controls[0].controls[0].value = self.tr.translate("reply_to_label") # Reply to title
+        self.input_area.content.controls[2].controls[0].tooltip = self.tr.translate("attach_file_tooltip") # Attach file button
+
+        # Emoji Panel
+        self.emoji_search.hint_text = self.tr.translate("search_emoji_hint")
+        
+        # Right Panel (Profile)
+        profile_header = self.profile_panel.controls[0].content
+        profile_header.controls[0].value = self.tr.translate("profile_title")
+        
+        info_tab_list = self.profile_panel.controls[3].tabs[0].content.controls
+        info_tab_list[0].title.value = self.tr.translate("username_label")
+        info_tab_list[1].title.value = self.tr.translate("status_label")
+        info_tab_list[3].title.value = self.tr.translate("notifications_label")
+
+        profile_tabs_bar = self.profile_panel.controls[3]
+        profile_tabs_bar.tabs[0].text = self.tr.translate("profile_tab_info")
+        profile_tabs_bar.tabs[1].text = self.tr.translate("profile_tab_media")
+        profile_tabs_bar.tabs[2].text = self.tr.translate("profile_tab_files")
+        
+        # Update currently visible profile data
+        await self.update_profile_panel(self.active_chat)
+        
+        # Update chat list (it has its own logic with chat names etc)
+        await self.update_chat_list()
+
+        # Update any open dialogs if necessary (e.g., settings)
+        if self.page.dialog and hasattr(self, 'settings_dialog') and self.page.dialog == self.settings_dialog:
+             # Re-create and show the settings dialog to reflect language changes
+            current_title = self.settings_title.value
+            self.close_settings(None)
+            self.open_settings(None)
+            # Try to restore the subpage if it was open
+            # This is complex, for now, just reopening is enough to show the main menu translated
+
+        self.update()
+        print("UI rebuild complete.")
+
+    # --- Call Management ---
+
+    async def hang_up_call(self, peer_username=None):
+        """Hangs up a specific call or all active calls."""
+        if not self.webrtc_manager.peer_connections:
+            return
+
+        peers_to_hangup = list(self.webrtc_manager.peer_connections.keys())
+        if peer_username:
+            if peer_username in peers_to_hangup:
+                peers_to_hangup = [peer_username]
+            else:
+                return # Not in a call with this user
+
+        for peer in peers_to_hangup:
+            self.webrtc_manager.end_call(peer)
+            if self.p2p_manager:
+                self.p2p_manager.send_webrtc_signal(peer, 'hangup', {})
+
+        if self.call_popup:
+            self.call_popup.open = False
+            self.call_popup = None
+
+        await self.add_message_to_box(self.tr.translate("call_ended_message"), 'global')
+        self.update()
 
 
+    async def show_incoming_call_dialog(self, peer_username, offer_sdp):
+        if self.webrtc_manager.peer_connections:
+            if self.p2p_manager:
+                self.p2p_manager.send_webrtc_signal(peer_username, 'busy', {})
+            return
+
+        async def accept_call(e):
+            self.page.dialog.open = False
+            self.update()
+            self.webrtc_manager.handle_offer(peer_username, offer_sdp)
+            await self.show_call_dialog(peer_username)
+            await self.add_message_to_box(self.tr.translate("call_accepted_message").format(username=peer_username), 'global')
+
+        async def decline_call(e):
+            self.page.dialog.open = False
+            self.update()
+            if self.p2p_manager:
+                self.p2p_manager.send_webrtc_signal(peer_username, 'hangup', {})
+            await self.add_message_to_box(self.tr.translate("call_declined_message").format(username=peer_username), 'global')
+
+        self.page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(self.tr.translate("incoming_call_title"), text_align=ft.TextAlign.CENTER),
+            content=ft.Column([
+                ft.CircleAvatar(content=ft.Text(peer_username[0].upper()), radius=30),
+                ft.Text(peer_username, size=18, weight=ft.FontWeight.BOLD)
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            actions=[
+                ft.IconButton(icon=ft.icons.CALL_END, bgcolor=self.error_color, icon_color=ft.colors.WHITE, on_click=decline_call, tooltip=self.tr.translate("decline_button")),
+                ft.IconButton(icon=ft.icons.CALL, bgcolor=self.success_color, icon_color=ft.colors.WHITE, on_click=accept_call, tooltip=self.tr.translate("accept_button")),
+            ],
+            actions_alignment=ft.MainAxisAlignment.CENTER,
+            bgcolor=self.surface_color,
+            shape=ft.RoundedRectangleBorder(radius=20),
+            content_padding=ft.padding.all(25)
+        )
+        self.page.dialog.open = True
+        self.update()
+
+
+    async def show_call_dialog(self, peer_username):
+        if self.call_popup:
+            self.call_popup.open = False
+
+        def toggle_mute(e):
+            self.is_muted = not self.is_muted
+            self.webrtc_manager.set_mute(self.is_muted)
+            mute_button.icon = ft.icons.MIC_OFF if self.is_muted else ft.icons.MIC
+            mute_button.bgcolor = self.primary_purple if self.is_muted else self.secondary_gray
+            mute_status = 'ON' if self.is_muted else 'OFF'
+            self.page.run_task(self.add_message_to_box, self.tr.translate("mute_status_message").format(status=mute_status), 'global')
+            self.update()
+
+        async def hang_up(e):
+            await self.hang_up_call(peer_username)
+
+        mute_button = ft.IconButton(
+            icon=ft.icons.MIC_OFF if self.is_muted else ft.icons.MIC,
+            on_click=toggle_mute,
+            tooltip=self.tr.translate("mute_unmute_tooltip"),
+            icon_size=30,
+            bgcolor=self.secondary_gray,
+            icon_color=ft.colors.WHITE
+        )
+
+        self.call_popup = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(self.tr.translate("call_in_progress_title"), text_align=ft.TextAlign.CENTER),
+            content=ft.Column([
+                ft.CircleAvatar(content=ft.Text(peer_username[0].upper()), radius=30),
+                ft.Text(peer_username, size=18, weight=ft.FontWeight.BOLD),
+                ft.Text("00:00", size=14) # Placeholder for call timer
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            actions=[
+                mute_button,
+                ft.IconButton(icon=ft.icons.CALL_END, bgcolor=self.error_color, icon_color=ft.colors.WHITE, on_click=hang_up, tooltip=self.tr.translate("hang_up_button"), icon_size=30),
+            ],
+            actions_alignment=ft.MainAxisAlignment.CENTER,
+            actions_vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            bgcolor=self.surface_color,
+            shape=ft.RoundedRectangleBorder(radius=20),
+            content_padding=ft.padding.all(25)
+        )
+        self.page.dialog = self.call_popup
+        self.call_popup.open = True
+        self.update()
+
+    def close_dialog(self):
+        if self.page.dialog:
+            self.page.dialog.open = False
+            self.update()
+
+    async def show_incoming_contact_request_dialog(self, sender_username, payload):
+        password_required = payload.get('password_protected', False)
+        password_field = ft.TextField(label=self.tr.translate("password_label"), password=True, can_reveal_password=True, visible=password_required)
+
+        def respond(e, accepted):
+            password = password_field.value if password_required else None
+            self.close_dialog()
+
+            if self.p2p_manager:
+                self.p2p_manager.send_contact_request_response(sender_username, accepted, password)
+            if accepted and not password_required: # If password required, acceptance is confirmed on successful channel establishment
+                self.contacts.add(sender_username)
+                self.page.run_task(self.update_chat_list)
+
+
+        self.page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(self.tr.translate("contact_request_title")),
+            content=ft.Column([
+                ft.Text(self.tr.translate("incoming_contact_request_message").format(username=sender_username)),
+                password_field
+            ]),
+            actions=[
+                ft.TextButton(self.tr.translate("decline_button"), on_click=lambda e: respond(e, False)),
+                ft.TextButton(self.tr.translate("accept_button"), on_click=lambda e: respond(e, True), style=ft.ButtonStyle(color=self.primary_purple)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            bgcolor=self.surface_color,
+            shape=ft.RoundedRectangleBorder(radius=10)
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    # --- Group Management Dialogs ---
+
+    async def show_invite_to_group_dialog(self):
+        def send_invite(e):
+            username = username_field.value.strip()
+            if not username:
+                return
+            
+            self.close_dialog()
+            if self.p2p_manager and self.active_chat in self.p2p_manager.groups:
+                self.p2p_manager.invite_to_group(self.active_chat, username)
+                self.page.run_task(self.show_popup, self.tr.translate("invitation_sent_title"), self.tr.translate("group_invitation_sent_message").format(group_name=self.p2p_manager.groups[self.active_chat]['name'], username=username))
+            else:
+                self.page.run_task(self.show_popup, self.tr.translate("error_title"), self.tr.translate("group_invitation_error_message"))
+
+        username_field = ft.TextField(label=self.tr.translate("username_to_invite_label"), width=300)
+        
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("invite_to_group_title")),
+            content=username_field,
+            actions=[
+                ft.TextButton(self.tr.translate("send_invite_button"), on_click=send_invite),
+                ft.TextButton(self.tr.translate("cancel_button"), on_click=lambda e: self.close_dialog()),
+            ],
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    async def show_group_invite_dialog(self, group_id, group_name, admin_username):
+        def respond(e, accepted):
+            self.close_dialog()
+            if self.p2p_manager:
+                self.p2p_manager.respond_to_group_invite(group_id, admin_username, accepted)
+            if accepted:
+                self.page.run_task(self.add_message_to_box, self.tr.translate("joined_group_message").format(group_name=group_name), 'global')
+
+        self.page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(self.tr.translate("group_invitation_title")),
+            content=ft.Text(self.tr.translate("incoming_group_invitation_message").format(group_name=group_name, username=admin_username)),
+            actions=[
+                ft.TextButton(self.tr.translate("accept_button"), on_click=lambda e: respond(e, True)),
+                ft.TextButton(self.tr.translate("decline_button"), on_click=lambda e: respond(e, False)),
+            ],
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    async def show_incoming_group_call_dialog(self, group_id, admin_username):
+        if self.active_group_call or self.webrtc_manager.peer_connections:
+            # Auto-reject if already in any call
+            if self.p2p_manager:
+                self.p2p_manager.respond_to_group_call(group_id, False)
+            return
+
+        group_name = self.p2p_manager.groups.get(group_id, {}).get('name', 'a group')
+
+        async def respond(e, accepted):
+            self.close_dialog()
+            if self.p2p_manager:
+                self.p2p_manager.respond_to_group_call(group_id, accepted)
+            if accepted:
+                self.active_group_call = group_id
+                await self.show_group_call_dialog(group_id)
+
+        self.page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(self.tr.translate("incoming_group_call_title")),
+            content=ft.Text(self.tr.translate("incoming_group_call_message").format(username=admin_username, group_name=group_name)),
+            actions=[
+                ft.TextButton(self.tr.translate("join_button"), on_click=lambda e: respond(e, True)),
+                ft.TextButton(self.tr.translate("decline_button"), on_click=lambda e: respond(e, False)),
+            ],
+        )
+        self.page.dialog.open = True
+        self.update()
+
+    async def show_group_call_dialog(self, group_id):
+        if self.group_call_popup:
+            self.group_call_popup.open = False
+        
+        group_name = self.p2p_manager.groups.get(group_id, {}).get('name', 'Group Call')
+
+        def toggle_mute_group(e):
+            self.is_muted = not self.is_muted
+            # Group call mute logic would go in audio manager
+            mute_button.icon = ft.icons.MIC_OFF if self.is_muted else ft.icons.MIC
+            self.update()
+
+        async def hang_up_group(e):
+            if self.p2p_manager:
+                self.p2p_manager.hang_up_group_call(group_id)
+            self.active_group_call = None
+            self.group_call_popup.open = False
+            self.update()
+
+        mute_button = ft.IconButton(icon=ft.icons.MIC, on_click=toggle_mute_group)
+        
+        self.group_call_popup = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(self.tr.translate("in_call_title").format(group_name=group_name)),
+            content=ft.Row([mute_button], alignment=ft.MainAxisAlignment.CENTER),
+            actions=[ft.TextButton(self.tr.translate("leave_call_button"), on_click=hang_up_group, style=ft.ButtonStyle(color=ft.colors.RED))],
+            actions_alignment=ft.MainAxisAlignment.CENTER,
+        )
+        self.page.dialog = self.group_call_popup
+        self.group_call_popup.open = True
+        self.update()
+
+    def leave_group(self, e):
+        if self.p2p_manager and self.active_chat in self.p2p_manager.groups:
+            group_id = self.active_chat
+            self.p2p_manager.leave_group(group_id)
+            self.switch_chat('global')
+            self.page.run_task(self.update_chat_list)
+            self.page.run_task(self.show_popup, self.tr.translate("group_left_title"), self.tr.translate("group_left_message"))
+
+    async def show_kick_user_dialog(self):
+        def kick_user(e):
+            username = username_field.value.strip()
+            if not username:
+                return
+            
+            self.close_dialog()
+            if self.p2p_manager and self.active_chat in self.p2p_manager.groups:
+                self.p2p_manager.kick_user_from_group(self.active_chat, username)
+
+        username_field = ft.TextField(label=self.tr.translate("username_to_kick_label"), width=300)
+        
+        self.page.dialog = ft.AlertDialog(
+            title=ft.Text(self.tr.translate("kick_user_from_group_title")),
+            content=username_field,
+            actions=[
+                ft.TextButton(self.tr.translate("kick_button"), on_click=kick_user),
+                ft.TextButton(self.tr.translate("cancel_button"), on_click=lambda e: self.close_dialog()),
+            ],
+        )
+        self.page.dialog.open = True
+        self.update()
+
+
+async def main(page: ft.Page):
+    logging.info("Main function started.")
+    app = VoiceChatApp(page)
+    
+    logging.info("Building main layout...")
+    page.add(app.build())
+    
+    logging.info("Performing initial page update.")
+    page.update()
+    
+    logging.info("Initializing application...")
+    # The app logic will now be kicked off after the UI is built
+    await app.initialize_app()
 
 if __name__ == '__main__':
-    VoiceChatApp().run()
+    ft.app(target=main)
+

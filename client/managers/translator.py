@@ -11,8 +11,8 @@ class Translator:
     def load_translations(self):
         """Loads the entire translation file."""
         try:
-            # Look for the localization file in the same directory as this script
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+            # Look for the localization file in the client directory (parent of managers)
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             path = os.path.join(base_dir, self.lang_path)
             with open(path, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -56,6 +56,10 @@ class Translator:
         except KeyError as e:
             print(f"Warning: Placeholder {e} not found in translation for key '{key}'")
             return string
+
+    def translate(self, key, default_text=None, **kwargs):
+        """Compatibility method for translate calls"""
+        return self.get(key, default_text, **kwargs)
 
 # Example Usage:
 if __name__ == '__main__':

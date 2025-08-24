@@ -8,7 +8,7 @@ import msgpack
 import zstandard as zstd
 import sys
 from kademlia.network import Server as KademliaServer
-from encryption_manager import EncryptionManager
+from .encryption_manager import EncryptionManager
 
 P2P_PORT = 12346
 BROADCAST_ADDR = '<broadcast>'
