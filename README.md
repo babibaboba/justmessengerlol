@@ -8,7 +8,7 @@ The project is organized into two main parts:
 
 -   `VoiceChat/`: Contains the backend logic and client-side Python scripts.
     -   `client/client.py`: Example Python client for interaction.
-            -   `front/`: The React.js frontend application.
+    -   -   `front/`: The React.js frontend application.
     -   `server/server.py`: Contains the server-side Python implementation.
 
 ## Frontend
