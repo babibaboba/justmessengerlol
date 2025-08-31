@@ -1,0 +1,64 @@
+{
+  "name": "Message",
+  "type": "object",
+  "properties": {
+    "chat_id": {
+      "type": "string",
+      "description": "ID of the chat this message belongs to"
+    },
+    "sender_id": {
+      "type": "string",
+      "description": "ID of the user who sent the message"
+    },
+    "content": {
+      "type": "string",
+      "description": "Message content/text"
+    },
+    "message_type": {
+      "type": "string",
+      "enum": [
+        "text",
+        "image",
+        "file",
+        "voice",
+        "video"
+      ],
+      "default": "text",
+      "description": "Type of message"
+    },
+    "file_url": {
+      "type": "string",
+      "description": "URL for media messages"
+    },
+    "reply_to": {
+      "type": "string",
+      "description": "ID of message being replied to"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "sending",
+        "sent",
+        "delivered",
+        "read"
+      ],
+      "default": "sent",
+      "description": "Message delivery status"
+    },
+    "edited": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether message was edited"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When message was sent"
+    }
+  },
+  "required": [
+    "chat_id",
+    "sender_id",
+    "content"
+  ]
+}

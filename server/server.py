@@ -168,8 +168,15 @@ class Server:
 
         if not username:
             return
+        udp_addr = payload.get('udp_addr')
+        # Если udp_addr не предоставлен или невалиден, установим его в None или адрес по умолчанию
+        if isinstance(udp_addr, list) and len(udp_addr) == 2:
+            udp_addr = tuple(udp_addr)
+        else:
+            udp_addr = None # Или можно установить дефолтный адрес, например ('0.0.0.0', 0)
+            
         with self.client_lock:
-            self.clients[client_socket] = {'username': username, 'address': client_socket.getpeername(), 'udp_addr': None}
+            self.clients[client_socket] = {'username': username, 'address': client_socket.getpeername(), 'udp_addr': udp_addr}
         print(f"User '{username}' logged in.")
         
         self._send_to_client(client_socket, 'login_success')

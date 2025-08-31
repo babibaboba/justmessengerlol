@@ -1,0 +1,61 @@
+{
+  "name": "Chat",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Name of the chat or group"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "direct",
+        "group",
+        "channel",
+        "favorites"
+      ],
+      "default": "direct",
+      "description": "Type of chat"
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "User IDs of chat participants"
+    },
+    "last_message": {
+      "type": "string",
+      "description": "Last message in the chat"
+    },
+    "last_message_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp of last message"
+    },
+    "unread_count": {
+      "type": "number",
+      "default": 0,
+      "description": "Number of unread messages"
+    },
+    "avatar_url": {
+      "type": "string",
+      "description": "Chat avatar image URL"
+    },
+    "is_pinned": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether chat is pinned"
+    },
+    "is_muted": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether chat is muted"
+    }
+  },
+  "required": [
+    "name",
+    "type",
+    "participants"
+  ]
+}
