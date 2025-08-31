@@ -26,7 +26,7 @@ The frontend for this application is based on the [TelwareSW/telware-frontend](h
 
 1.  Navigate to the frontend directory:
     ```bash
-    cd telware-frontend-main/app
+    cd VoiceChat/front/app
     ```
 2.  Install dependencies:
     ```bash
